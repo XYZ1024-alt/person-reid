@@ -1,0 +1,5 @@
+torch
+Pillow
+opencv-python
+ultralytics
+tqdm
