@@ -21,6 +21,7 @@ STEM_STRIDE = 2
 LAST_STRIDE = 1
 HALF_RATIO = 2
 GRAD_REVERSE_SCALE = 1.0
+IMAGENET_LOADED_PREFIX = "Loaded ImageNet pretrained backbone parameters"
 
 
 @dataclass(frozen=True)
@@ -163,3 +164,92 @@ def _clothes_classifier(embedding_dim: int, num_clothes_classes: int) -> nn.Line
     if num_clothes_classes <= 0:
         return None
     return nn.Linear(embedding_dim, num_clothes_classes, bias=True)
+
+
+def load_imagenet_pretrained_backbone(backbone: ResNet50IBNBackbone) -> int:
+    from torchvision.models import ResNet50_Weights, resnet50
+
+    source = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).state_dict()
+    loaded = _load_stem(backbone, source)
+    loaded += _load_resnet_layers(backbone, source)
+    print(f"{IMAGENET_LOADED_PREFIX}: {loaded}")
+    return loaded
+
+
+def _load_stem(backbone: ResNet50IBNBackbone, source: dict[str, torch.Tensor]) -> int:
+    _copy_parameter(backbone.stem[0].weight, source["conv1.weight"])
+    _load_batch_norm(backbone.stem[1], source, "bn1")
+    return 6
+
+
+def _load_resnet_layers(backbone: ResNet50IBNBackbone, source: dict[str, torch.Tensor]) -> int:
+    loaded = 0
+    for layer_name in ["layer1", "layer2", "layer3", "layer4"]:
+        loaded += _load_layer(getattr(backbone, layer_name), source, layer_name)
+    return loaded
+
+
+def _load_layer(layer: nn.Sequential, source: dict[str, torch.Tensor], layer_name: str) -> int:
+    loaded = 0
+    for block_index, block in enumerate(layer):
+        prefix = f"{layer_name}.{block_index}"
+        loaded += _load_block(block, source, prefix)
+    return loaded
+
+
+def _load_block(block: BottleneckIBN, source: dict[str, torch.Tensor], prefix: str) -> int:
+    loaded = _load_block_convolutions(block, source, prefix)
+    loaded += _load_norm1(block.norm1, source, f"{prefix}.bn1")
+    loaded += _load_batch_norm(block.bn2, source, f"{prefix}.bn2")
+    loaded += _load_batch_norm(block.bn3, source, f"{prefix}.bn3")
+    if block.downsample is not None:
+        loaded += _load_downsample(block.downsample, source, f"{prefix}.downsample")
+    return loaded
+
+
+def _load_block_convolutions(block: BottleneckIBN, source: dict[str, torch.Tensor], prefix: str) -> int:
+    _copy_parameter(block.conv1.weight, source[f"{prefix}.conv1.weight"])
+    _copy_parameter(block.conv2.weight, source[f"{prefix}.conv2.weight"])
+    _copy_parameter(block.conv3.weight, source[f"{prefix}.conv3.weight"])
+    return 3
+
+
+def _load_norm1(norm: nn.Module, source: dict[str, torch.Tensor], prefix: str) -> int:
+    if isinstance(norm, IBN):
+        return _load_ibn(norm, source, prefix)
+    return _load_batch_norm(norm, source, prefix)
+
+
+def _load_ibn(norm: IBN, source: dict[str, torch.Tensor], prefix: str) -> int:
+    _load_batch_norm_suffix(norm.batch_norm, source, prefix, norm.split)
+    return 5
+
+
+def _load_downsample(downsample: nn.Sequential, source: dict[str, torch.Tensor], prefix: str) -> int:
+    _copy_parameter(downsample[0].weight, source[f"{prefix}.0.weight"])
+    return 1 + _load_batch_norm(downsample[1], source, f"{prefix}.1")
+
+
+def _load_batch_norm(module: nn.BatchNorm2d, source: dict[str, torch.Tensor], prefix: str) -> int:
+    _copy_parameter(module.weight, source[f"{prefix}.weight"])
+    _copy_parameter(module.bias, source[f"{prefix}.bias"])
+    _copy_buffer(module.running_mean, source[f"{prefix}.running_mean"])
+    _copy_buffer(module.running_var, source[f"{prefix}.running_var"])
+    _copy_buffer(module.num_batches_tracked, source[f"{prefix}.num_batches_tracked"])
+    return 5
+
+
+def _load_batch_norm_suffix(module: nn.BatchNorm2d, source: dict[str, torch.Tensor], prefix: str, start: int) -> None:
+    _copy_parameter(module.weight, source[f"{prefix}.weight"][start:])
+    _copy_parameter(module.bias, source[f"{prefix}.bias"][start:])
+    _copy_buffer(module.running_mean, source[f"{prefix}.running_mean"][start:])
+    _copy_buffer(module.running_var, source[f"{prefix}.running_var"][start:])
+    _copy_buffer(module.num_batches_tracked, source[f"{prefix}.num_batches_tracked"])
+
+
+def _copy_parameter(target: nn.Parameter, source: torch.Tensor) -> None:
+    target.data.copy_(source)
+
+
+def _copy_buffer(target: torch.Tensor, source: torch.Tensor) -> None:
+    target.copy_(source)

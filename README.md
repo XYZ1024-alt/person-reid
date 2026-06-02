@@ -2,7 +2,8 @@
 
 This project now has a standalone pure PyTorch ReID path under `robust_person_reid`.
 It uses a pure PyTorch ResNet50-IBN backbone with BNNeck and CAL.
-It does not use external ReID frameworks or torchvision models.
+It initializes the custom ResNet50-IBN backbone from ImageNet ResNet50 weights.
+It does not use external ReID frameworks.
 
 ## Data
 
@@ -36,3 +37,25 @@ python -m scripts.evaluate --checkpoint outputs/robust_person_reid/best.pth --da
 ```
 
 Evaluation reports standard, dark-query, and occluded-query Rank-1/Rank-5/mAP.
+
+## Plot Figures
+
+Training writes metrics to:
+
+```text
+outputs/robust_person_reid/training_metrics.csv
+outputs/robust_person_reid/evaluation_metrics.csv
+```
+
+Generate paper figures after training:
+
+```powershell
+python -m scripts.plot_metrics --dataset prcc
+python -m scripts.plot_metrics --dataset market
+```
+
+Figures are saved under:
+
+```text
+outputs/robust_person_reid/figures
+```

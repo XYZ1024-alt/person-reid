@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+import csv
 from pathlib import Path
 import random
 
@@ -11,11 +12,14 @@ from tqdm import tqdm
 from robust_person_reid.builders import build_train_loader, build_training_dataset
 from robust_person_reid.engine.evaluator import evaluate_enabled_datasets, primary_rank1
 from robust_person_reid.modules.losses import batch_hard_triplet_loss
-from robust_person_reid.modules.model import RobustPersonReIDNet
+from robust_person_reid.modules.model import RobustPersonReIDNet, load_imagenet_pretrained_backbone
 
 
 CHECKPOINT_LAST = "last.pth"
 CHECKPOINT_BEST = "best.pth"
+TRAIN_METRICS_CSV = "training_metrics.csv"
+EVAL_METRICS_CSV = "evaluation_metrics.csv"
+EVAL_METRIC_FIELDS = ["rank1", "rank2", "rank3", "rank4", "rank5", "mAP"]
 NO_CAL_LOSS = 0.0
 
 
@@ -27,6 +31,7 @@ def train_from_args(args: Namespace) -> None:
     loader = build_train_loader(dataset, args)
     _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
     model = RobustPersonReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
+    initialize_backbone(model, args.resume)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     start_epoch = load_checkpoint(args.resume, model, optimizer)
     run_training(model, loader, optimizer, start_epoch, dataset, device, args)
@@ -36,6 +41,12 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def initialize_backbone(model: RobustPersonReIDNet, resume_path: str) -> None:
+    if resume_path:
+        return
+    load_imagenet_pretrained_backbone(model.backbone)
 
 
 def train_one_epoch(model, loader, optimizer, device: torch.device, args: Namespace) -> dict[str, float]:
@@ -75,10 +86,13 @@ def load_checkpoint(path: str, model, optimizer) -> int:
 
 def run_training(model, loader, optimizer, start_epoch: int, dataset, device, args) -> None:
     best_rank1 = 0.0
+    output_dir = Path(args.output_dir)
+    _initialize_metric_files(output_dir, start_epoch)
     for epoch in range(start_epoch, args.epochs):
         print(f"epoch={epoch + 1}/{args.epochs}")
         metrics = train_one_epoch(model, loader, optimizer, device, args)
         _print_epoch(epoch, metrics)
+        _write_train_metrics(output_dir, epoch, metrics)
         if (epoch + 1) % args.eval_period == 0 or epoch + 1 == args.epochs:
             best_rank1 = _evaluate_and_save(model, optimizer, epoch, dataset, best_rank1, device, args)
 
@@ -106,6 +120,7 @@ def _evaluate_and_save(model, optimizer, epoch: int, dataset, best: float, devic
     eval_metrics = evaluate_enabled_datasets(model, device, args)
     selected_rank1 = primary_rank1(eval_metrics)
     output_dir = Path(args.output_dir)
+    _write_eval_metrics(output_dir, epoch, eval_metrics)
     save_checkpoint(output_dir / CHECKPOINT_LAST, model, optimizer, epoch, selected_rank1, dataset)
     if selected_rank1 <= best:
         return best
@@ -118,6 +133,61 @@ def _accumulate(totals: dict[str, float], loss: float, ce_loss: float, triplet: 
     totals["ce"] += ce_loss
     totals["triplet"] += triplet
     totals["cal"] += cal_loss
+
+
+def _initialize_metric_files(output_dir: Path, start_epoch: int) -> None:
+    if start_epoch > 0:
+        _ensure_eval_metric_header(output_dir / EVAL_METRICS_CSV)
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_header(output_dir / TRAIN_METRICS_CSV, ["epoch", "loss", "ce", "triplet", "cal"])
+    _write_header(output_dir / EVAL_METRICS_CSV, _eval_fieldnames())
+
+
+def _write_header(path: Path, fieldnames: list[str]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        csv.DictWriter(handle, fieldnames=fieldnames).writeheader()
+
+
+def _write_train_metrics(output_dir: Path, epoch: int, metrics: dict[str, float]) -> None:
+    row = {"epoch": epoch + 1, **metrics}
+    _append_row(output_dir / TRAIN_METRICS_CSV, ["epoch", "loss", "ce", "triplet", "cal"], row)
+
+
+def _write_eval_metrics(output_dir: Path, epoch: int, eval_results) -> None:
+    for job, metrics_by_variant in eval_results:
+        for variant, metrics in metrics_by_variant.items():
+            row = {"epoch": epoch + 1, "dataset": job.name, "variant": variant, **metrics}
+            _append_row(output_dir / EVAL_METRICS_CSV, _eval_fieldnames(), row)
+
+
+def _append_row(path: Path, fieldnames: list[str], row: dict) -> None:
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writerow(row)
+
+
+def _eval_fieldnames() -> list[str]:
+    return ["epoch", "dataset", "variant", *EVAL_METRIC_FIELDS]
+
+
+def _ensure_eval_metric_header(path: Path) -> None:
+    if not path.exists():
+        _write_header(path, _eval_fieldnames())
+        return
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if rows and set(_eval_fieldnames()).issubset(rows[0].keys()):
+        return
+    _rewrite_eval_metric_file(path, rows)
+
+
+def _rewrite_eval_metric_file(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_eval_fieldnames())
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in _eval_fieldnames()})
 
 
 def _batch_metrics(loss, ce_loss, triplet, cal_loss) -> dict[str, str]:

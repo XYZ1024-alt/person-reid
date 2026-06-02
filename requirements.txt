@@ -1,5 +1,7 @@
 torch
+torchvision
 Pillow
 opencv-python
 ultralytics
 tqdm
+matplotlib
