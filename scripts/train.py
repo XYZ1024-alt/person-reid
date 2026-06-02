@@ -18,6 +18,9 @@ DEFAULT_WEIGHT_DECAY = 5e-4
 DEFAULT_MARGIN = 0.3
 DEFAULT_TRIPLET_WEIGHT = 1.0
 DEFAULT_CAL_WEIGHT = 0.5
+DEFAULT_CAL_WARMUP_EPOCHS = 10
+DEFAULT_CAL_RAMP_EPOCHS = 10
+DEFAULT_PRCC_IDENTITIES_RATIO = 0.5
 DEFAULT_WORKERS = 4
 DEFAULT_EVAL_PERIOD = 5
 DEFAULT_SEED = 42
@@ -37,6 +40,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--triplet-margin", type=float, default=DEFAULT_MARGIN)
     parser.add_argument("--triplet-weight", type=float, default=DEFAULT_TRIPLET_WEIGHT)
     parser.add_argument("--cal-weight", type=float, default=DEFAULT_CAL_WEIGHT)
+    parser.add_argument("--cal-warmup-epochs", type=int, default=DEFAULT_CAL_WARMUP_EPOCHS)
+    parser.add_argument("--cal-ramp-epochs", type=int, default=DEFAULT_CAL_RAMP_EPOCHS)
+    parser.add_argument("--prcc-identities-ratio", type=float, default=DEFAULT_PRCC_IDENTITIES_RATIO)
+    parser.add_argument("--disable-source-balanced-sampling", action="store_true")
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)

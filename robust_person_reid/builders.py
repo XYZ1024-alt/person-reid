@@ -12,7 +12,11 @@ from robust_person_reid.data.datasets import (
     load_prcc_samples,
     relabel_samples,
 )
-from robust_person_reid.data.samplers import IdentityBatchSampler
+from robust_person_reid.data.samplers import (
+    IdentityBatchSampler,
+    SourceBalancedIdentityBatchSampler,
+    SourceBalancedSamplerConfig,
+)
 from robust_person_reid.data.transforms import ReIDTransform, TransformConfig
 
 
@@ -35,8 +39,21 @@ def build_eval_loader(root: str | Path, dataset_name: str, split: str, variant: 
 
 
 def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
+    if _use_source_balanced_sampling(args):
+        config = SourceBalancedSamplerConfig(
+            samples=dataset.samples,
+            batch_size=args.batch_size,
+            instances=args.instances,
+            source_ratio=args.prcc_identities_ratio,
+        )
+        sampler = SourceBalancedIdentityBatchSampler(config)
+        return DataLoader(dataset, batch_sampler=sampler, num_workers=args.num_workers)
     sampler = IdentityBatchSampler(dataset.samples, args.batch_size, args.instances)
     return DataLoader(dataset, batch_sampler=sampler, num_workers=args.num_workers)
+
+
+def _use_source_balanced_sampling(args: Namespace) -> bool:
+    return args.mode == MODE_JOINT and not args.disable_source_balanced_sampling
 
 
 def _training_samples(args: Namespace) -> list[ReidSample]:
