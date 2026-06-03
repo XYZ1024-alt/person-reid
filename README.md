@@ -46,7 +46,7 @@ C images are another outfit.
 Useful PRCC options:
 
 ```powershell
---use-prcc-sketch --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2
+--sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2
 --prcc-identities-ratio 0.5 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --disable-source-balanced-sampling
 ```
 
@@ -56,9 +56,9 @@ Run PRCC-focused ablation with separate output folders:
 
 ```powershell
 python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/ablation/baseline
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --use-prcc-sketch --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0 --disable-source-balanced-sampling --output-dir outputs/ablation/sketch_id
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --use-prcc-sketch --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2 --disable-source-balanced-sampling --output-dir outputs/ablation/sketch_consistency
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0.05 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --use-prcc-sketch --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2 --prcc-identities-ratio 0.5 --output-dir outputs/ablation/full
+python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0 --disable-source-balanced-sampling --output-dir outputs/ablation/sketch_id
+python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2 --disable-source-balanced-sampling --output-dir outputs/ablation/sketch_consistency
+python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0.05 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2 --prcc-identities-ratio 0.5 --output-dir outputs/ablation/full
 ```
 
 Evaluate both PRCC and Market-1501 for each run:
