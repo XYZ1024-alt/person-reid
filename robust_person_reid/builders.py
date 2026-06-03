@@ -35,7 +35,7 @@ def build_eval_loader(root: str | Path, dataset_name: str, split: str, variant: 
     samples = _eval_samples(root, dataset_name, split)
     transform = ReIDTransform(TransformConfig(train=False, variant=variant))
     dataset = ReIDDataset(samples, transform)
-    return DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers)
+    return DataLoader(dataset, batch_size=args.batch_size, **_loader_kwargs(args))
 
 
 def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
@@ -47,13 +47,29 @@ def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
             source_ratio=args.prcc_identities_ratio,
         )
         sampler = SourceBalancedIdentityBatchSampler(config)
-        return DataLoader(dataset, batch_sampler=sampler, num_workers=args.num_workers)
+        return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
     sampler = IdentityBatchSampler(dataset.samples, args.batch_size, args.instances)
-    return DataLoader(dataset, batch_sampler=sampler, num_workers=args.num_workers)
+    return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
 
 
 def _use_source_balanced_sampling(args: Namespace) -> bool:
     return args.mode == MODE_JOINT and not args.disable_source_balanced_sampling
+
+
+def _loader_kwargs(args: Namespace) -> dict:
+    num_workers = args.num_workers
+    return {
+        "num_workers": num_workers,
+        "pin_memory": bool(getattr(args, "pin_memory", False)),
+        "persistent_workers": _persistent_workers(args, num_workers),
+    }
+
+
+def _persistent_workers(args: Namespace, num_workers: int) -> bool:
+    requested = getattr(args, "persistent_workers", None)
+    if requested is None:
+        return num_workers > 0
+    return bool(requested) and num_workers > 0
 
 
 def _training_samples(args: Namespace) -> list[ReidSample]:

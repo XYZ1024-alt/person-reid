@@ -24,6 +24,9 @@ DEFAULT_PRCC_IDENTITIES_RATIO = 0.5
 DEFAULT_WORKERS = 4
 DEFAULT_EVAL_PERIOD = 5
 DEFAULT_SEED = 42
+DEFAULT_PIN_MEMORY = True
+PRECISION_FP16 = "fp16"
+PRECISION_FP32 = "fp32"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,11 +48,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prcc-identities-ratio", type=float, default=DEFAULT_PRCC_IDENTITIES_RATIO)
     parser.add_argument("--disable-source-balanced-sampling", action="store_true")
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=DEFAULT_PIN_MEMORY)
+    parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--precision", choices=[PRECISION_FP16, PRECISION_FP32], default=default_precision())
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", default="")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
+
+
+def default_precision() -> str:
+    if torch.cuda.is_available():
+        return PRECISION_FP16
+    return PRECISION_FP32
 
 
 def main() -> None:

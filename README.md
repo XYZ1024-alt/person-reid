@@ -26,6 +26,14 @@ python -m scripts.train --mode prcc --epochs 60
 python -m scripts.train --mode market --cal-weight 0 --epochs 60
 ```
 
+CUDA training uses FP16 mixed precision by default. DataLoader uses pinned
+memory by default and keeps workers persistent when `--num-workers` is greater
+than 0. To disable these speed options:
+
+```powershell
+--precision fp32 --no-pin-memory --no-persistent-workers
+```
+
 CAL requires clothes labels, so `--cal-weight` defaults to `0.5` and should be
 used with PRCC or joint training. Market-1501 does not provide clothes labels.
 Joint training uses source-balanced identity sampling by default, with half of

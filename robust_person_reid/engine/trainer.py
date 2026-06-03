@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from contextlib import nullcontext
 import csv
 from pathlib import Path
 import random
@@ -22,6 +23,9 @@ EVAL_METRICS_CSV = "evaluation_metrics.csv"
 TRAIN_METRIC_FIELDS = ["epoch", "loss", "ce", "triplet", "cal", "effective_cal_weight"]
 EVAL_METRIC_FIELDS = ["rank1", "rank2", "rank3", "rank4", "rank5", "mAP"]
 NO_CAL_LOSS = 0.0
+PRECISION_FP16 = "fp16"
+PRECISION_FP32 = "fp32"
+CUDA_DEVICE_TYPE = "cuda"
 
 
 def train_from_args(args: Namespace) -> None:
@@ -35,8 +39,9 @@ def train_from_args(args: Namespace) -> None:
     model = RobustPersonReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
     initialize_backbone(model, args.resume)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scaler = _build_grad_scaler(args, device)
     start_epoch = load_checkpoint(args.resume, model, optimizer)
-    run_training(model, loader, optimizer, start_epoch, dataset, device, args)
+    run_training(model, loader, optimizer, scaler, start_epoch, dataset, device, args)
 
 
 def set_seed(seed: int) -> None:
@@ -51,13 +56,28 @@ def initialize_backbone(model: RobustPersonReIDNet, resume_path: str) -> None:
     load_imagenet_pretrained_backbone(model.backbone)
 
 
-def train_one_epoch(model, loader, optimizer, device: torch.device, args: Namespace, epoch: int) -> dict[str, float]:
+def _build_grad_scaler(args: Namespace, device: torch.device):
+    enabled = _use_amp(args, device)
+    return torch.amp.GradScaler(CUDA_DEVICE_TYPE, enabled=enabled)
+
+
+def _autocast_context(args: Namespace, device: torch.device):
+    if not _use_amp(args, device):
+        return nullcontext()
+    return torch.amp.autocast(CUDA_DEVICE_TYPE, dtype=torch.float16)
+
+
+def _use_amp(args: Namespace, device: torch.device) -> bool:
+    return args.precision == PRECISION_FP16 and device.type == CUDA_DEVICE_TYPE
+
+
+def train_one_epoch(model, loader, optimizer, scaler, device: torch.device, args: Namespace, epoch: int) -> dict[str, float]:
     model.train()
     totals = {"loss": 0.0, "ce": 0.0, "triplet": 0.0, "cal": 0.0}
     effective_cal_weight = _effective_cal_weight(args, epoch)
     progress = tqdm(loader, desc="batches", unit="batch")
     for batch in progress:
-        loss, ce_loss, triplet, cal_loss = _train_batch(model, batch, optimizer, device, args, effective_cal_weight)
+        loss, ce_loss, triplet, cal_loss = _train_batch(model, batch, optimizer, scaler, device, args, effective_cal_weight)
         _accumulate(totals, loss.item(), ce_loss.item(), triplet.item(), cal_loss.item())
         progress.set_postfix(_batch_metrics(loss, ce_loss, triplet, cal_loss, effective_cal_weight))
     metrics = {key: value / len(loader) for key, value in totals.items()}
@@ -78,6 +98,8 @@ def validate_training_args(args: Namespace) -> None:
         raise ValueError("cal_warmup_epochs must be >= 0")
     if args.cal_ramp_epochs < 0:
         raise ValueError("cal_ramp_epochs must be >= 0")
+    if args.precision == PRECISION_FP16 and not args.device.startswith(CUDA_DEVICE_TYPE):
+        raise ValueError("fp16 precision requires a CUDA device")
 
 
 def save_checkpoint(path: Path, model, optimizer, epoch: int, metric: float, dataset) -> None:
@@ -96,35 +118,38 @@ def load_checkpoint(path: str, model, optimizer) -> int:
     return int(checkpoint["epoch"]) + 1
 
 
-def run_training(model, loader, optimizer, start_epoch: int, dataset, device, args) -> None:
+def run_training(model, loader, optimizer, scaler, start_epoch: int, dataset, device, args) -> None:
     best_rank1 = 0.0
     output_dir = Path(args.output_dir)
     _initialize_metric_files(output_dir, start_epoch)
+    print(f"precision={args.precision} pin_memory={args.pin_memory} persistent_workers={_loader_has_persistent_workers(loader)}")
     for epoch in range(start_epoch, args.epochs):
         print(f"epoch={epoch + 1}/{args.epochs}")
-        metrics = train_one_epoch(model, loader, optimizer, device, args, epoch)
+        metrics = train_one_epoch(model, loader, optimizer, scaler, device, args, epoch)
         _print_epoch(epoch, metrics)
         _write_train_metrics(output_dir, epoch, metrics)
         if (epoch + 1) % args.eval_period == 0 or epoch + 1 == args.epochs:
             best_rank1 = _evaluate_and_save(model, optimizer, epoch, dataset, best_rank1, device, args)
 
 
-def _train_batch(model, batch, optimizer, device: torch.device, args: Namespace, effective_cal_weight: float):
-    images = batch["image"].to(device)
+def _train_batch(model, batch, optimizer, scaler, device: torch.device, args: Namespace, effective_cal_weight: float):
+    images = batch["image"].to(device, non_blocking=args.pin_memory)
     labels = batch["label"]
     clothes_labels = batch["clothes_label"]
-    outputs = model(images)
+    with _autocast_context(args, device):
+        outputs = model(images)
     _validate_batch_targets(labels, outputs["logits"].size(1), "identity label")
     _validate_batch_clothes_targets(clothes_labels, outputs, effective_cal_weight)
-    labels = labels.to(device)
-    clothes_labels = clothes_labels.to(device)
-    ce_loss = F.cross_entropy(outputs["logits"], labels)
-    triplet = batch_hard_triplet_loss(outputs["features"], labels, args.triplet_margin)
+    labels = labels.to(device, non_blocking=args.pin_memory)
+    clothes_labels = clothes_labels.to(device, non_blocking=args.pin_memory)
+    ce_loss = F.cross_entropy(outputs["logits"].float(), labels)
+    triplet = batch_hard_triplet_loss(outputs["features"].float(), labels, args.triplet_margin)
     cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
     loss = ce_loss + args.triplet_weight * triplet + effective_cal_weight * cal_loss
     optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
     return loss, ce_loss, triplet, cal_loss
 
 
@@ -230,7 +255,7 @@ def _cal_loss(outputs: dict[str, torch.Tensor], clothes_labels: torch.Tensor, ca
     known = clothes_labels.ge(0)
     if not known.any():
         return torch.zeros((), device=clothes_labels.device)
-    return F.cross_entropy(outputs["clothes_logits"][known], clothes_labels[known])
+    return F.cross_entropy(outputs["clothes_logits"][known].float(), clothes_labels[known])
 
 
 def _checkpoint_metadata(epoch: int, metric: float, dataset) -> dict[str, int | float]:
@@ -262,6 +287,10 @@ def _effective_cal_weight(args: Namespace, epoch: int) -> float:
     if args.cal_ramp_epochs == 0 or ramp_index >= args.cal_ramp_epochs:
         return args.cal_weight
     return args.cal_weight * ramp_index / args.cal_ramp_epochs
+
+
+def _loader_has_persistent_workers(loader) -> bool:
+    return bool(getattr(loader, "persistent_workers", False))
 
 
 def _target_values(samples, field_name: str) -> list[int]:
