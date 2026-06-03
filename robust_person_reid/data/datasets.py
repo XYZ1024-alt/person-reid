@@ -28,6 +28,7 @@ SPLIT_GALLERY = "gallery"
 class ReidSample:
     source: str
     path: Path
+    sketch_path: Path | None
     pid: int
     camid: int
     clothes_id: int
@@ -49,10 +50,11 @@ class ReIDDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict:
         sample = self.samples[index]
-        with Image.open(sample.path) as image:
-            tensor = self.transform(image)
+        tensor, sketch_tensor = self._load_tensors(sample)
         return {
             "image": tensor,
+            "sketch_image": sketch_tensor,
+            "has_sketch": sample.sketch_path is not None,
             "label": sample.label,
             "pid": sample.pid,
             "camid": sample.camid,
@@ -63,6 +65,14 @@ class ReIDDataset(Dataset):
             "source": sample.source,
         }
 
+    def _load_tensors(self, sample: ReidSample) -> tuple:
+        with Image.open(sample.path) as image:
+            if sample.sketch_path is None:
+                tensor = self.transform(image)
+                return tensor, tensor.new_zeros(tensor.shape)
+            with Image.open(sample.sketch_path) as sketch:
+                return self.transform.pair(image, sketch)
+
 
 def load_market_samples(root: str | Path, split: str) -> list[ReidSample]:
     split_dir = Path(root) / "pytorch" / split
@@ -71,27 +81,47 @@ def load_market_samples(root: str | Path, split: str) -> list[ReidSample]:
     return _filter_train_junk(samples, split)
 
 
-def load_prcc_samples(root: str | Path, split: str) -> list[ReidSample]:
-    split_dir = _prcc_split_dir(Path(root), split)
+def load_prcc_samples(root: str | Path, split: str, use_sketch: bool = False) -> list[ReidSample]:
+    split_dir = _prcc_split_dir(Path(root), split, "rgb")
     _require_dir(split_dir)
-    samples = [_prcc_sample(path) for path in _image_files(split_dir)]
+    sketch_dir = _prcc_split_dir(Path(root), split, "sketch") if use_sketch else None
+    samples = [_prcc_sample(path, split_dir, sketch_dir) for path in _image_files(split_dir)]
     return _filter_train_junk(samples, split)
 
 
 def relabel_samples(samples: list[ReidSample]) -> list[ReidSample]:
     label_by_identity = _label_map((sample.source, sample.pid) for sample in samples if not sample.is_junk)
-    return [_with_relabel(sample, label_by_identity) for sample in samples]
+    label_by_clothes = _label_map(_known_clothes_identity(sample) for sample in samples)
+    return [_with_relabel(sample, label_by_identity, label_by_clothes) for sample in samples]
 
 
-def _with_relabel(sample: ReidSample, label_by_identity: dict[tuple[str, int], int]) -> ReidSample:
+def _with_relabel(
+    sample: ReidSample,
+    label_by_identity: dict[tuple[str, int], int],
+    label_by_clothes: dict[tuple[str, int, int], int],
+) -> ReidSample:
     if sample.is_junk:
         return replace(sample, label=JUNK_LABEL)
-    return replace(sample, label=label_by_identity[(sample.source, sample.pid)])
+    clothes_id = _relabel_clothes(sample, label_by_clothes)
+    return replace(sample, label=label_by_identity[(sample.source, sample.pid)], clothes_id=clothes_id)
 
 
 def _label_map(identities) -> dict:
     unique_identities = sorted(set(identity for identity in identities if identity is not None))
     return {identity: label for label, identity in enumerate(unique_identities)}
+
+
+def _known_clothes_identity(sample: ReidSample) -> tuple[str, int, int] | None:
+    if sample.clothes_id == UNKNOWN_CLOTHES:
+        return None
+    return sample.source, sample.pid, sample.clothes_id
+
+
+def _relabel_clothes(sample: ReidSample, label_by_clothes: dict[tuple[str, int, int], int]) -> int:
+    clothes_identity = _known_clothes_identity(sample)
+    if clothes_identity is None:
+        return UNKNOWN_CLOTHES
+    return label_by_clothes[clothes_identity]
 
 
 def _market_sample(path: Path) -> ReidSample:
@@ -101,23 +131,41 @@ def _market_sample(path: Path) -> ReidSample:
     pid = int(stem_parts[0])
     camid = int(stem_parts[1][1])
     is_junk = pid <= 0
-    return ReidSample(MARKET_SOURCE, path, pid, camid, UNKNOWN_CLOTHES, pid, is_junk)
+    return ReidSample(MARKET_SOURCE, path, None, pid, camid, UNKNOWN_CLOTHES, pid, is_junk)
 
 
-def _prcc_sample(path: Path) -> ReidSample:
+def _prcc_sample(path: Path, rgb_dir: Path, sketch_dir: Path | None) -> ReidSample:
     camera = _prcc_camera(path)
     pid = _prcc_pid(path)
     clothes_id = PRCC_CHANGED_CLOTHES if camera == PRCC_QUERY_CAMERA else PRCC_SAME_CLOTHES
-    return ReidSample(PRCC_SOURCE, path, pid, PRCC_CAMERAS[camera], clothes_id, pid, False)
+    sketch_path = _matching_sketch_path(path, rgb_dir, sketch_dir)
+    return ReidSample(PRCC_SOURCE, path, sketch_path, pid, PRCC_CAMERAS[camera], clothes_id, pid, False)
 
 
-def _prcc_split_dir(root: Path, split: str) -> Path:
-    base = root / "rgb" if (root / "rgb").exists() else root
+def _prcc_split_dir(root: Path, split: str, modality: str) -> Path:
+    base = _prcc_modality_base(root, modality)
     if split == SPLIT_QUERY:
         return _first_existing([base / SPLIT_QUERY, base / "test" / PRCC_QUERY_CAMERA])
     if split == SPLIT_GALLERY:
         return _first_existing([base / SPLIT_GALLERY, base / "test" / PRCC_GALLERY_CAMERA])
     return base / split
+
+
+def _prcc_modality_base(root: Path, modality: str) -> Path:
+    if (root / modality).exists():
+        return root / modality
+    if root.name in {"rgb", "sketch"}:
+        return root.parent / modality
+    return root
+
+
+def _matching_sketch_path(path: Path, rgb_dir: Path, sketch_dir: Path | None) -> Path | None:
+    if sketch_dir is None:
+        return None
+    sketch_path = sketch_dir / path.relative_to(rgb_dir)
+    if not sketch_path.exists():
+        raise FileNotFoundError(f"Missing PRCC sketch pair for {path}: {sketch_path}")
+    return sketch_path
 
 
 def _filter_train_junk(samples: list[ReidSample], split: str) -> list[ReidSample]:

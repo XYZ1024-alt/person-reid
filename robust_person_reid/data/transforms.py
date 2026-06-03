@@ -48,9 +48,23 @@ class ReIDTransform:
         tensor = self._apply_tensor_augments(tensor)
         return _normalize(tensor)
 
+    def pair(self, image: Image.Image, sketch: Image.Image) -> tuple[torch.Tensor, torch.Tensor]:
+        image = _resize_rgb(image, self.config)
+        sketch = _resize_rgb(sketch, self.config)
+        if self.config.train and random.random() < FLIP_PROBABILITY:
+            image = _flip(image)
+            sketch = _flip(sketch)
+        image = self._apply_non_geometric_image_augments(image)
+        tensor = self._apply_tensor_augments(_image_to_tensor(image))
+        sketch_tensor = _image_to_tensor(sketch)
+        return _normalize(tensor), _normalize(sketch_tensor)
+
     def _apply_image_augments(self, image: Image.Image) -> Image.Image:
         if self.config.train and random.random() < FLIP_PROBABILITY:
-            image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            image = _flip(image)
+        return self._apply_non_geometric_image_augments(image)
+
+    def _apply_non_geometric_image_augments(self, image: Image.Image) -> Image.Image:
         if self.config.train:
             image = _jitter_image(image)
         if self.config.variant == VARIANT_DARK or _train_event(self.config.train, DARK_PROBABILITY):
@@ -69,6 +83,14 @@ def _image_to_tensor(image: Image.Image) -> torch.Tensor:
     buffer = bytearray(image.tobytes())
     tensor = torch.frombuffer(buffer, dtype=torch.uint8).view(height, width, RGB_CHANNELS)
     return tensor.permute(2, 0, 1).float().div(PIXEL_SCALE)
+
+
+def _resize_rgb(image: Image.Image, config: TransformConfig) -> Image.Image:
+    return image.convert("RGB").resize((config.width, config.height))
+
+
+def _flip(image: Image.Image) -> Image.Image:
+    return image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
 
 
 def _normalize(tensor: torch.Tensor) -> torch.Tensor:

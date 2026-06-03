@@ -24,6 +24,7 @@ DEFAULT_WORKERS = 4
 DEFAULT_MATRIX_SIZE = 64
 TRAIN_METRICS_CSV = "training_metrics.csv"
 EVAL_METRICS_CSV = "evaluation_metrics.csv"
+TRAIN_CURVE_METRICS = ["loss", "ce", "triplet", "cal", "sketch", "consistency"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,7 +76,7 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
 def plot_training_curves(rows: list[dict[str, str]], fig_dir: Path) -> None:
     epochs = [int(row["epoch"]) for row in rows]
     plt.figure(figsize=(8, 5))
-    for metric in ["loss", "ce", "triplet", "cal"]:
+    for metric in _available_train_metrics(rows):
         plt.plot(epochs, _float_column(rows, metric), marker="o", label=metric)
     _save_line_plot(fig_dir / "training_loss_curves.png", "Training Loss Curves", "Epoch", "Loss")
 
@@ -119,6 +120,10 @@ def _similarity_matrix(query_features: torch.Tensor, gallery_features: torch.Ten
 
 def _float_column(rows: list[dict[str, str]], key: str) -> list[float]:
     return [float(row[key]) for row in rows]
+
+
+def _available_train_metrics(rows: list[dict[str, str]]) -> list[str]:
+    return [metric for metric in TRAIN_CURVE_METRICS if metric in rows[0]]
 
 
 def _group_eval_rows(rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:

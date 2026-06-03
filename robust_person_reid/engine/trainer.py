@@ -20,7 +20,16 @@ CHECKPOINT_LAST = "last.pth"
 CHECKPOINT_BEST = "best.pth"
 TRAIN_METRICS_CSV = "training_metrics.csv"
 EVAL_METRICS_CSV = "evaluation_metrics.csv"
-TRAIN_METRIC_FIELDS = ["epoch", "loss", "ce", "triplet", "cal", "effective_cal_weight"]
+TRAIN_METRIC_FIELDS = [
+    "epoch",
+    "loss",
+    "ce",
+    "triplet",
+    "cal",
+    "sketch",
+    "consistency",
+    "effective_cal_weight",
+]
 EVAL_METRIC_FIELDS = ["rank1", "rank2", "rank3", "rank4", "rank5", "mAP"]
 NO_CAL_LOSS = 0.0
 PRECISION_FP16 = "fp16"
@@ -73,13 +82,13 @@ def _use_amp(args: Namespace, device: torch.device) -> bool:
 
 def train_one_epoch(model, loader, optimizer, scaler, device: torch.device, args: Namespace, epoch: int) -> dict[str, float]:
     model.train()
-    totals = {"loss": 0.0, "ce": 0.0, "triplet": 0.0, "cal": 0.0}
+    totals = _empty_epoch_totals()
     effective_cal_weight = _effective_cal_weight(args, epoch)
     progress = tqdm(loader, desc="batches", unit="batch")
     for batch in progress:
-        loss, ce_loss, triplet, cal_loss = _train_batch(model, batch, optimizer, scaler, device, args, effective_cal_weight)
-        _accumulate(totals, loss.item(), ce_loss.item(), triplet.item(), cal_loss.item())
-        progress.set_postfix(_batch_metrics(loss, ce_loss, triplet, cal_loss, effective_cal_weight))
+        losses = _train_batch(model, batch, optimizer, scaler, device, args, effective_cal_weight)
+        _accumulate(totals, losses)
+        progress.set_postfix(_batch_metrics(losses, effective_cal_weight))
     metrics = {key: value / len(loader) for key, value in totals.items()}
     metrics["effective_cal_weight"] = effective_cal_weight
     return metrics
@@ -100,6 +109,10 @@ def validate_training_args(args: Namespace) -> None:
         raise ValueError("cal_ramp_epochs must be >= 0")
     if args.precision == PRECISION_FP16 and not args.device.startswith(CUDA_DEVICE_TYPE):
         raise ValueError("fp16 precision requires a CUDA device")
+    if args.sketch_loss_weight < 0:
+        raise ValueError("sketch_loss_weight must be >= 0")
+    if args.rgb_sketch_consistency_weight < 0:
+        raise ValueError("rgb_sketch_consistency_weight must be >= 0")
 
 
 def save_checkpoint(path: Path, model, optimizer, epoch: int, metric: float, dataset) -> None:
@@ -136,6 +149,7 @@ def _train_batch(model, batch, optimizer, scaler, device: torch.device, args: Na
     images = batch["image"].to(device, non_blocking=args.pin_memory)
     labels = batch["label"]
     clothes_labels = batch["clothes_label"]
+    has_sketch = batch["has_sketch"].bool()
     with _autocast_context(args, device):
         outputs = model(images)
     _validate_batch_targets(labels, outputs["logits"].size(1), "identity label")
@@ -145,12 +159,58 @@ def _train_batch(model, batch, optimizer, scaler, device: torch.device, args: Na
     ce_loss = F.cross_entropy(outputs["logits"].float(), labels)
     triplet = batch_hard_triplet_loss(outputs["features"].float(), labels, args.triplet_margin)
     cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
-    loss = ce_loss + args.triplet_weight * triplet + effective_cal_weight * cal_loss
+    sketch_loss, consistency_loss = _sketch_losses(model, batch, outputs, labels, has_sketch, device, args)
+    loss = _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss, effective_cal_weight)
     optimizer.zero_grad()
     scaler.scale(loss).backward()
     scaler.step(optimizer)
     scaler.update()
-    return loss, ce_loss, triplet, cal_loss
+    return {
+        "loss": loss,
+        "ce": ce_loss,
+        "triplet": triplet,
+        "cal": cal_loss,
+        "sketch": sketch_loss,
+        "consistency": consistency_loss,
+    }
+
+
+def _sketch_losses(model, batch, rgb_outputs, labels: torch.Tensor, has_sketch: torch.Tensor, device, args):
+    if not _use_sketch_loss(args, has_sketch):
+        return _zero_loss(device), _zero_loss(device)
+    device_mask = has_sketch.to(device, non_blocking=args.pin_memory)
+    sketch_images = batch["sketch_image"][has_sketch].to(device, non_blocking=args.pin_memory)
+    sketch_labels = labels[device_mask]
+    with _autocast_context(args, device):
+        sketch_outputs = model(sketch_images)
+    sketch_ce = F.cross_entropy(sketch_outputs["logits"].float(), sketch_labels)
+    sketch_triplet = _optional_triplet(sketch_outputs["features"].float(), sketch_labels, args.triplet_margin)
+    consistency = _consistency_loss(rgb_outputs["features"][device_mask].float(), sketch_outputs["features"].float())
+    return sketch_ce + args.triplet_weight * sketch_triplet, consistency
+
+
+def _use_sketch_loss(args: Namespace, has_sketch: torch.Tensor) -> bool:
+    if not args.use_prcc_sketch:
+        return False
+    if args.sketch_loss_weight <= 0 and args.rgb_sketch_consistency_weight <= 0:
+        return False
+    return bool(has_sketch.any().item())
+
+
+def _optional_triplet(features: torch.Tensor, labels: torch.Tensor, margin: float) -> torch.Tensor:
+    if len(labels.unique()) < 2:
+        return _zero_loss(features.device)
+    return batch_hard_triplet_loss(features, labels, margin)
+
+
+def _consistency_loss(rgb_features: torch.Tensor, sketch_features: torch.Tensor) -> torch.Tensor:
+    return 1.0 - F.cosine_similarity(rgb_features, sketch_features, dim=1).mean()
+
+
+def _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss, effective_cal_weight: float):
+    loss = ce_loss + args.triplet_weight * triplet + effective_cal_weight * cal_loss
+    loss = loss + args.sketch_loss_weight * sketch_loss
+    return loss + args.rgb_sketch_consistency_weight * consistency_loss
 
 
 def _evaluate_and_save(model, optimizer, epoch: int, dataset, best: float, device, args) -> float:
@@ -165,11 +225,17 @@ def _evaluate_and_save(model, optimizer, epoch: int, dataset, best: float, devic
     return selected_rank1
 
 
-def _accumulate(totals: dict[str, float], loss: float, ce_loss: float, triplet: float, cal_loss: float) -> None:
-    totals["loss"] += loss
-    totals["ce"] += ce_loss
-    totals["triplet"] += triplet
-    totals["cal"] += cal_loss
+def _accumulate(totals: dict[str, float], losses: dict[str, torch.Tensor]) -> None:
+    for key in totals:
+        totals[key] += losses[key].item()
+
+
+def _empty_epoch_totals() -> dict[str, float]:
+    return {"loss": 0.0, "ce": 0.0, "triplet": 0.0, "cal": 0.0, "sketch": 0.0, "consistency": 0.0}
+
+
+def _zero_loss(device: torch.device) -> torch.Tensor:
+    return torch.zeros((), device=device)
 
 
 def _initialize_metric_files(output_dir: Path, start_epoch: int) -> None:
@@ -239,12 +305,14 @@ def _rewrite_metric_file(path: Path, rows: list[dict[str, str]], fieldnames: lis
             writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
-def _batch_metrics(loss, ce_loss, triplet, cal_loss, cal_weight: float) -> dict[str, str]:
+def _batch_metrics(losses: dict[str, torch.Tensor], cal_weight: float) -> dict[str, str]:
     return {
-        "loss": f"{loss.item():.4f}",
-        "ce": f"{ce_loss.item():.4f}",
-        "tri": f"{triplet.item():.4f}",
-        "cal": f"{cal_loss.item():.4f}",
+        "loss": f"{losses['loss'].item():.4f}",
+        "ce": f"{losses['ce'].item():.4f}",
+        "tri": f"{losses['triplet'].item():.4f}",
+        "cal": f"{losses['cal'].item():.4f}",
+        "sk": f"{losses['sketch'].item():.4f}",
+        "con": f"{losses['consistency'].item():.4f}",
         "cal_w": f"{cal_weight:.4f}",
     }
 
@@ -271,6 +339,7 @@ def _print_epoch(epoch: int, metrics: dict[str, float]) -> None:
     print(
         f"epoch={epoch + 1} loss={metrics['loss']:.4f} ce={metrics['ce']:.4f} "
         f"triplet={metrics['triplet']:.4f} cal={metrics['cal']:.4f} "
+        f"sketch={metrics['sketch']:.4f} consistency={metrics['consistency']:.4f} "
         f"cal_w={metrics['effective_cal_weight']:.4f}"
     )
 

@@ -21,6 +21,9 @@ DEFAULT_CAL_WEIGHT = 0.5
 DEFAULT_CAL_WARMUP_EPOCHS = 10
 DEFAULT_CAL_RAMP_EPOCHS = 10
 DEFAULT_PRCC_IDENTITIES_RATIO = 0.5
+DEFAULT_USE_PRCC_SKETCH = True
+DEFAULT_SKETCH_LOSS_WEIGHT = 0.5
+DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT = 0.2
 DEFAULT_WORKERS = 4
 DEFAULT_EVAL_PERIOD = 5
 DEFAULT_SEED = 42
@@ -47,6 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cal-ramp-epochs", type=int, default=DEFAULT_CAL_RAMP_EPOCHS)
     parser.add_argument("--prcc-identities-ratio", type=float, default=DEFAULT_PRCC_IDENTITIES_RATIO)
     parser.add_argument("--disable-source-balanced-sampling", action="store_true")
+    parser.add_argument("--use-prcc-sketch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PRCC_SKETCH)
+    parser.add_argument("--sketch-loss-weight", type=float, default=DEFAULT_SKETCH_LOSS_WEIGHT)
+    parser.add_argument("--rgb-sketch-consistency-weight", type=float, default=DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT)
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=DEFAULT_PIN_MEMORY)
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None)

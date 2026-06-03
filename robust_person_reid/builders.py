@@ -35,7 +35,7 @@ def build_eval_loader(root: str | Path, dataset_name: str, split: str, variant: 
     samples = _eval_samples(root, dataset_name, split)
     transform = ReIDTransform(TransformConfig(train=False, variant=variant))
     dataset = ReIDDataset(samples, transform)
-    return DataLoader(dataset, batch_size=args.batch_size, **_loader_kwargs(args))
+    return DataLoader(dataset, batch_size=args.batch_size, **_eval_loader_kwargs(args))
 
 
 def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
@@ -65,6 +65,14 @@ def _loader_kwargs(args: Namespace) -> dict:
     }
 
 
+def _eval_loader_kwargs(args: Namespace) -> dict:
+    return {
+        "num_workers": args.num_workers,
+        "pin_memory": bool(getattr(args, "pin_memory", False)),
+        "persistent_workers": False,
+    }
+
+
 def _persistent_workers(args: Namespace, num_workers: int) -> bool:
     requested = getattr(args, "persistent_workers", None)
     if requested is None:
@@ -76,9 +84,11 @@ def _training_samples(args: Namespace) -> list[ReidSample]:
     if args.mode == MODE_MARKET:
         return load_market_samples(args.market_root, "train")
     if args.mode == MODE_PRCC:
-        return load_prcc_samples(args.prcc_root, "train")
+        return load_prcc_samples(args.prcc_root, "train", args.use_prcc_sketch)
     _require_prcc_root(args.prcc_root)
-    return load_market_samples(args.market_root, "train") + load_prcc_samples(args.prcc_root, "train")
+    market_samples = load_market_samples(args.market_root, "train")
+    prcc_samples = load_prcc_samples(args.prcc_root, "train", args.use_prcc_sketch)
+    return market_samples + prcc_samples
 
 
 def _eval_samples(root: str | Path, dataset_name: str, split: str) -> list[ReidSample]:
