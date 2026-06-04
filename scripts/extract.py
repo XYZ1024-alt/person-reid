@@ -8,6 +8,7 @@ import torch
 
 from robust_person_reid.data.transforms import ReIDTransform, TransformConfig
 from robust_person_reid.engine.evaluator import load_model
+from robust_person_reid.modules.metrics import REID_FEATURE_KEY
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,7 +26,7 @@ def main() -> None:
     transform = ReIDTransform(TransformConfig(train=False))
     image = transform(Image.open(Path(args.image))).unsqueeze(0).to(device)
     with torch.no_grad():
-        embedding = model(image)["features"].cpu().flatten()
+        embedding = model(image)[REID_FEATURE_KEY].cpu().flatten()
     print(" ".join(f"{value:.6f}" for value in embedding.tolist()))
 
 

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 TOP_K = 5
 PROTOCOL_STANDARD = "standard"
 PROTOCOL_CLOTH_CHANGE = "cloth_change"
+REID_FEATURE_KEY = "bn_features"
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ def extract_feature_bank(model, loader, device: torch.device) -> FeatureBank:
     with torch.no_grad():
         for batch in loader:
             outputs = model(batch["image"].to(device))
-            features.append(outputs["features"].cpu())
+            features.append(outputs[REID_FEATURE_KEY].cpu())
             pids.append(batch["pid"])
             camids.append(batch["camid"])
             clothes_ids.append(batch["clothes_id"])
@@ -92,4 +93,3 @@ def _metrics(cmc_total: torch.Tensor, aps: list[float], query_count: int) -> dic
     metrics = {f"rank{rank + 1}": (cmc_total[rank] / divisor).item() for rank in range(TOP_K)}
     metrics["mAP"] = float(sum(aps) / len(aps))
     return metrics
-
