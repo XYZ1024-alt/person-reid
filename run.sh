@@ -2,7 +2,7 @@
 set -euo pipefail
 
 GPUS="${GPUS:-2}"
-BATCH_SIZE="${BATCH_SIZE:-512}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
 START_STAGE="${START_STAGE:-1}"
 TORCHRUN="${TORCHRUN:-torchrun}"
@@ -42,14 +42,14 @@ train_distributed() {
 
 run_stage 1 train_distributed \
   --mode market \
-  --epochs 80 \
+  --epochs 120 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --cal-weight 0 \
   --no-use-prcc-sketch \
   --best-metric mAP \
   --eval-period 10 \
-  --color-jitter-probability 0.1 \
+  --color-jitter-probability 0 \
   --random-grayscale-probability 0 \
   --dark-augment-probability 0 \
   --occlusion-augment-probability 0 \
@@ -58,7 +58,7 @@ run_stage 1 evaluate_market "$EXP1/best.pth"
 
 run_stage 2 train_distributed \
   --mode market \
-  --epochs 20 \
+  --epochs 30 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --lr 0.0001 \
@@ -76,7 +76,7 @@ run_stage 2 evaluate_market "$EXP2/best.pth"
 
 run_stage 3 train_distributed \
   --mode market \
-  --epochs 20 \
+  --epochs 30 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --lr 0.0001 \
@@ -94,7 +94,7 @@ run_stage 3 evaluate_market "$EXP3/best.pth"
 
 run_stage 4 train_distributed \
   --mode joint \
-  --epochs 60 \
+  --epochs 80 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --lr 0.0001 \
@@ -121,7 +121,7 @@ run_stage 4 evaluate_prcc "$EXP4/best.pth"
 
 run_stage 5 train_distributed \
   --mode prcc \
-  --epochs 40 \
+  --epochs 50 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --lr 0.0001 \

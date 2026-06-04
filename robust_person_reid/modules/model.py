@@ -137,10 +137,15 @@ class RobustPersonReIDNet(nn.Module):
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         pooled = self.pool(self.backbone(images)).flatten(1)
-        embedding = self.bnneck(self.embedding(pooled))
-        outputs = {"logits": self.classifier(embedding), "features": F.normalize(embedding, dim=1)}
+        embedding = self.embedding(pooled)
+        bn_features = self.bnneck(embedding)
+        outputs = {
+            "logits": self.classifier(bn_features),
+            "features": F.normalize(embedding, dim=1),
+            "bn_features": F.normalize(bn_features, dim=1),
+        }
         if self.clothes_classifier is not None:
-            reversed_features = GradientReverse.apply(embedding, GRAD_REVERSE_SCALE)
+            reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
             outputs["clothes_logits"] = self.clothes_classifier(reversed_features)
         return outputs
 
