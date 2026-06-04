@@ -20,12 +20,13 @@ class SourceBalancedSamplerConfig:
     batch_size: int
     instances: int
     source_ratio: float
+    epoch_batch_size: int | None = None
     balanced_source: str = PRCC_SOURCE
     other_source: str = MARKET_SOURCE
 
 
 class IdentityBatchSampler(Sampler[list[int]]):
-    def __init__(self, samples: list[ReidSample], batch_size: int, instances: int):
+    def __init__(self, samples: list[ReidSample], batch_size: int, instances: int, *, epoch_batch_size: int | None = None):
         if instances < MIN_INSTANCES_PER_IDENTITY:
             raise ValueError("instances must be >= 2 for triplet training")
         if batch_size % instances != 0:
@@ -35,7 +36,7 @@ class IdentityBatchSampler(Sampler[list[int]]):
         self.identities_per_batch = batch_size // instances
         self.index_by_label = _group_indices(samples)
         self.labels = sorted(self.index_by_label)
-        self.num_batches = len(samples) // batch_size
+        self.num_batches = _num_batches(len(samples), epoch_batch_size or batch_size)
         if len(self.labels) < self.identities_per_batch:
             raise ValueError("Not enough identities for one identity-balanced batch")
 
@@ -55,14 +56,14 @@ class IdentityBatchSampler(Sampler[list[int]]):
 
 
 class ClothesAwareIdentityBatchSampler(Sampler[list[int]]):
-    def __init__(self, samples: list[ReidSample], batch_size: int, instances: int):
+    def __init__(self, samples: list[ReidSample], batch_size: int, instances: int, *, epoch_batch_size: int | None = None):
         _validate_batch_config(batch_size, instances)
         self.batch_size = batch_size
         self.instances = instances
         self.identities_per_batch = batch_size // instances
         self.index_by_label_clothes = _group_indices_by_label_clothes(samples)
         self.labels = sorted(self.index_by_label_clothes)
-        self.num_batches = len(samples) // batch_size
+        self.num_batches = _num_batches(len(samples), epoch_batch_size or batch_size)
         _validate_identity_count(self.labels, self.identities_per_batch)
         _validate_clothes_aware_groups(self.index_by_label_clothes)
 
@@ -98,7 +99,7 @@ class SourceBalancedIdentityBatchSampler(Sampler[list[int]]):
         self.source_counts = _source_identity_counts(self.identities_per_batch, config.source_ratio)
         self.balanced_source = config.balanced_source
         self.other_source = config.other_source
-        self.num_batches = len(config.samples) // config.batch_size
+        self.num_batches = _num_batches(len(config.samples), config.epoch_batch_size or config.batch_size)
         self._validate_sources()
         _validate_clothes_aware_groups(self.index_by_source_label_clothes[self.balanced_source])
 
@@ -136,6 +137,13 @@ def _validate_batch_config(batch_size: int, instances: int) -> None:
         raise ValueError("instances must be >= 2 for triplet training")
     if batch_size % instances != 0:
         raise ValueError("batch_size must be divisible by instances")
+
+
+def _num_batches(sample_count: int, batch_size: int) -> int:
+    batches = sample_count // batch_size
+    if batches <= 0:
+        raise ValueError(f"Not enough samples for one batch: samples={sample_count} batch_size={batch_size}")
+    return batches
 
 
 def _validate_identity_count(labels: list[int], identities_per_batch: int) -> None:

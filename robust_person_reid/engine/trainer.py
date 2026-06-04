@@ -3,11 +3,15 @@ from __future__ import annotations
 from argparse import Namespace
 from contextlib import nullcontext
 import csv
+from dataclasses import dataclass
+import os
 from pathlib import Path
 import random
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
 from robust_person_reid.builders import build_train_loader, build_training_dataset
@@ -40,6 +44,11 @@ NO_SKETCH_LOSS = 0.0
 PRECISION_FP16 = "fp16"
 PRECISION_FP32 = "fp32"
 CUDA_DEVICE_TYPE = "cuda"
+DDP_BACKEND = "nccl"
+DDP_FIND_UNUSED_PARAMETERS = True
+ENV_RANK = "RANK"
+ENV_WORLD_SIZE = "WORLD_SIZE"
+ENV_LOCAL_RANK = "LOCAL_RANK"
 PARTIAL_PRETRAIN_PREFIXES = ("backbone.", "embedding.", "bnneck.")
 AUGMENT_PROBABILITY_ARGS = (
     "flip_probability",
@@ -50,21 +59,37 @@ AUGMENT_PROBABILITY_ARGS = (
 )
 
 
+@dataclass(frozen=True)
+class DistributedContext:
+    enabled: bool = False
+    rank: int = 0
+    world_size: int = 1
+    local_rank: int = 0
+
+    @property
+    def is_main(self) -> bool:
+        return self.rank == 0
+
+
 def train_from_args(args: Namespace) -> None:
-    set_seed(args.seed)
-    validate_training_args(args)
-    device = torch.device(args.device)
-    dataset = build_training_dataset(args)
-    validate_training_dataset(dataset)
-    loader = build_train_loader(dataset, args)
-    _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
-    model = RobustPersonReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
-    initialize_model_weights(model, args)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = _build_grad_scaler(args, device)
-    start_epoch = load_checkpoint(args.resume, model, optimizer)
-    model = configure_multi_gpu(model, args, device)
-    run_training(model, loader, optimizer, scaler, start_epoch, dataset, device, args)
+    distributed = initialize_distributed(args)
+    try:
+        set_seed(args.seed + distributed.rank)
+        validate_training_args(args, distributed)
+        device = training_device(args, distributed)
+        dataset = build_training_dataset(args)
+        validate_training_dataset(dataset)
+        loader = build_train_loader(dataset, args, distributed)
+        _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
+        model = RobustPersonReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
+        initialize_model_weights(model, args, distributed)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        scaler = _build_grad_scaler(args, device)
+        start_epoch = load_checkpoint(args.resume, model, optimizer)
+        model = configure_parallel_model(model, args, device, distributed)
+        run_training(model, loader, optimizer, scaler, start_epoch, dataset, device, args, distributed)
+    finally:
+        cleanup_distributed(distributed)
 
 
 def set_seed(seed: int) -> None:
@@ -73,16 +98,16 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def initialize_model_weights(model: RobustPersonReIDNet, args: Namespace) -> None:
+def initialize_model_weights(model: RobustPersonReIDNet, args: Namespace, distributed: DistributedContext) -> None:
     if args.resume:
         return
     if args.pretrained_checkpoint:
-        load_partial_pretrained_checkpoint(model, args.pretrained_checkpoint)
+        load_partial_pretrained_checkpoint(model, args.pretrained_checkpoint, distributed)
         return
-    load_imagenet_pretrained_backbone(model.backbone)
+    load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
 
 
-def load_partial_pretrained_checkpoint(model: RobustPersonReIDNet, path: str) -> None:
+def load_partial_pretrained_checkpoint(model: RobustPersonReIDNet, path: str, distributed: DistributedContext) -> None:
     checkpoint = torch.load(path, map_location="cpu")
     source = checkpoint["model"]
     target = model.state_dict()
@@ -92,9 +117,9 @@ def load_partial_pretrained_checkpoint(model: RobustPersonReIDNet, path: str) ->
         raise ValueError(f"No compatible partial pretrained parameters found in {path}")
     target.update(selected)
     model.load_state_dict(target)
-    print(f"Loaded partial pretrained parameters: {len(selected)} from {path}")
-    print(f"Skipped classifier parameters: {skipped_heads}")
-    print(f"Partial pretrained prefixes: {PARTIAL_PRETRAIN_PREFIXES}")
+    rank_zero_print(distributed, f"Loaded partial pretrained parameters: {len(selected)} from {path}")
+    rank_zero_print(distributed, f"Skipped classifier parameters: {skipped_heads}")
+    rank_zero_print(distributed, f"Partial pretrained prefixes: {PARTIAL_PRETRAIN_PREFIXES}")
 
 
 def _partial_pretrained_state(source: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -139,7 +164,50 @@ def _use_amp(args: Namespace, device: torch.device) -> bool:
     return args.precision == PRECISION_FP16 and device.type == CUDA_DEVICE_TYPE
 
 
-def configure_multi_gpu(model: torch.nn.Module, args: Namespace, device: torch.device) -> torch.nn.Module:
+def initialize_distributed(args: Namespace) -> DistributedContext:
+    if not args.distributed:
+        return DistributedContext()
+    _require_distributed_env()
+    if not torch.cuda.is_available():
+        raise ValueError("--distributed requires CUDA")
+    rank = int(os.environ[ENV_RANK])
+    world_size = int(os.environ[ENV_WORLD_SIZE])
+    local_rank = int(os.environ[ENV_LOCAL_RANK])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend=DDP_BACKEND)
+    return DistributedContext(True, rank, world_size, local_rank)
+
+
+def cleanup_distributed(distributed: DistributedContext) -> None:
+    if distributed.enabled and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def training_device(args: Namespace, distributed: DistributedContext) -> torch.device:
+    if distributed.enabled:
+        return torch.device(CUDA_DEVICE_TYPE, distributed.local_rank)
+    return torch.device(args.device)
+
+
+def configure_parallel_model(
+    model: torch.nn.Module,
+    args: Namespace,
+    device: torch.device,
+    distributed: DistributedContext,
+) -> torch.nn.Module:
+    if distributed.enabled:
+        rank_zero_print(
+            distributed,
+            f"distributed=True world_size={distributed.world_size} "
+            f"local_batch_size={args.batch_size // distributed.world_size} "
+            f"find_unused_parameters={DDP_FIND_UNUSED_PARAMETERS}",
+        )
+        return DistributedDataParallel(
+            model,
+            device_ids=[distributed.local_rank],
+            output_device=distributed.local_rank,
+            find_unused_parameters=DDP_FIND_UNUSED_PARAMETERS,
+        )
     if not args.multi_gpu:
         return model
     gpu_count = torch.cuda.device_count()
@@ -147,12 +215,27 @@ def configure_multi_gpu(model: torch.nn.Module, args: Namespace, device: torch.d
     return torch.nn.DataParallel(model)
 
 
-def train_one_epoch(model, loader, optimizer, scaler, device: torch.device, args: Namespace, epoch: int) -> dict[str, float]:
+def _require_distributed_env() -> None:
+    missing = [name for name in (ENV_RANK, ENV_WORLD_SIZE, ENV_LOCAL_RANK) if name not in os.environ]
+    if missing:
+        raise RuntimeError(f"--distributed must be launched with torchrun; missing env vars: {missing}")
+
+
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    scaler,
+    device: torch.device,
+    args: Namespace,
+    epoch: int,
+    distributed: DistributedContext,
+) -> dict[str, float]:
     model.train()
     totals = _empty_epoch_totals()
     effective_cal_weight = _effective_cal_weight(args, epoch)
     effective_consistency_weight = _effective_sketch_consistency_weight(args, epoch)
-    progress = tqdm(loader, desc="batches", unit="batch")
+    progress = tqdm(loader, desc="batches", unit="batch", disable=not distributed.is_main)
     for batch in progress:
         losses = _train_batch(model, batch, optimizer, scaler, device, args, effective_cal_weight, effective_consistency_weight)
         _accumulate(totals, losses)
@@ -171,7 +254,7 @@ def validate_training_dataset(dataset) -> None:
         _validate_contiguous_targets(known_clothes, dataset.num_clothes_classes, "clothes label")
 
 
-def validate_training_args(args: Namespace) -> None:
+def validate_training_args(args: Namespace, distributed: DistributedContext) -> None:
     if args.cal_warmup_epochs < 0:
         raise ValueError("cal_warmup_epochs must be >= 0")
     if args.cal_ramp_epochs < 0:
@@ -191,7 +274,7 @@ def validate_training_args(args: Namespace) -> None:
     if args.best_metric not in BEST_METRIC_CHOICES:
         raise ValueError(f"best_metric must be one of {sorted(BEST_METRIC_CHOICES)}, got {args.best_metric}")
     _validate_probability_args(args)
-    _validate_multi_gpu_args(args)
+    _validate_parallel_args(args, distributed)
 
 
 def _validate_probability_args(args: Namespace) -> None:
@@ -217,21 +300,20 @@ def load_checkpoint(path: str, model, optimizer) -> int:
     return int(checkpoint["epoch"]) + 1
 
 
-def run_training(model, loader, optimizer, scaler, start_epoch: int, dataset, device, args) -> None:
+def run_training(model, loader, optimizer, scaler, start_epoch: int, dataset, device, args, distributed) -> None:
     best_metric_value = 0.0
     output_dir = Path(args.output_dir)
-    _initialize_metric_files(output_dir, start_epoch)
-    print(
-        f"precision={args.precision} best_metric={args.best_metric} "
-        f"pin_memory={args.pin_memory} persistent_workers={_loader_has_persistent_workers(loader)}"
-    )
+    if distributed.is_main:
+        _initialize_metric_files(output_dir, start_epoch)
+        print(_training_header(args, loader, distributed))
     for epoch in range(start_epoch, args.epochs):
-        print(f"epoch={epoch + 1}/{args.epochs}")
-        metrics = train_one_epoch(model, loader, optimizer, scaler, device, args, epoch)
-        _print_epoch(epoch, metrics)
-        _write_train_metrics(output_dir, epoch, metrics)
+        rank_zero_print(distributed, f"epoch={epoch + 1}/{args.epochs}")
+        metrics = train_one_epoch(model, loader, optimizer, scaler, device, args, epoch, distributed)
+        if distributed.is_main:
+            _print_epoch(epoch, metrics)
+            _write_train_metrics(output_dir, epoch, metrics)
         if (epoch + 1) % args.eval_period == 0 or epoch + 1 == args.epochs:
-            best_metric_value = _evaluate_and_save(model, optimizer, epoch, dataset, best_metric_value, device, args)
+            best_metric_value = _evaluate_epoch(model, optimizer, epoch, dataset, best_metric_value, device, args, distributed)
 
 
 def _train_batch(
@@ -337,16 +419,29 @@ def _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss,
 
 
 def _evaluate_and_save(model, optimizer, epoch: int, dataset, best: float, device, args) -> float:
-    eval_metrics = evaluate_enabled_datasets(model, device, args)
+    eval_model = _unwrap_model(model)
+    eval_metrics = evaluate_enabled_datasets(eval_model, device, args)
     selected_metric = primary_eval_metric(eval_metrics, args.best_metric)
     output_dir = Path(args.output_dir)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
-    save_checkpoint(output_dir / CHECKPOINT_LAST, model, optimizer, epoch, args.best_metric, selected_metric, dataset)
+    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, epoch, args.best_metric, selected_metric, dataset)
     if selected_metric <= best:
         return best
-    save_checkpoint(output_dir / CHECKPOINT_BEST, model, optimizer, epoch, args.best_metric, selected_metric, dataset)
+    save_checkpoint(output_dir / CHECKPOINT_BEST, eval_model, optimizer, epoch, args.best_metric, selected_metric, dataset)
     print(f"new_best {args.best_metric}={selected_metric:.4f}")
     return selected_metric
+
+
+def _evaluate_epoch(model, optimizer, epoch: int, dataset, best: float, device, args, distributed) -> float:
+    if distributed.is_main:
+        best = _evaluate_and_save(model, optimizer, epoch, dataset, best, device, args)
+    synchronize_distributed(distributed)
+    return best
+
+
+def synchronize_distributed(distributed: DistributedContext) -> None:
+    if distributed.enabled:
+        dist.barrier()
 
 
 def _accumulate(totals: dict[str, float], losses: dict[str, torch.Tensor]) -> None:
@@ -498,10 +593,44 @@ def _loader_has_persistent_workers(loader) -> bool:
     return bool(getattr(loader, "persistent_workers", False))
 
 
+def _training_header(args: Namespace, loader, distributed: DistributedContext) -> str:
+    parts = [
+        f"precision={args.precision}",
+        f"best_metric={args.best_metric}",
+        f"pin_memory={args.pin_memory}",
+        f"persistent_workers={_loader_has_persistent_workers(loader)}",
+    ]
+    if distributed.enabled:
+        parts.extend([f"world_size={distributed.world_size}", f"rank={distributed.rank}"])
+    return " ".join(parts)
+
+
+def rank_zero_print(distributed: DistributedContext, message: str) -> None:
+    if distributed.is_main:
+        print(message)
+
+
 def _unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
-    if isinstance(model, torch.nn.DataParallel):
+    if isinstance(model, (torch.nn.DataParallel, DistributedDataParallel)):
         return model.module
     return model
+
+
+def _validate_parallel_args(args: Namespace, distributed: DistributedContext) -> None:
+    if args.distributed:
+        _validate_distributed_args(args, distributed)
+    _validate_multi_gpu_args(args)
+
+
+def _validate_distributed_args(args: Namespace, distributed: DistributedContext) -> None:
+    if args.multi_gpu:
+        raise ValueError("--distributed and --multi-gpu are mutually exclusive")
+    if distributed.world_size <= 1:
+        raise ValueError("--distributed requires WORLD_SIZE > 1")
+    if args.batch_size % distributed.world_size != 0:
+        raise ValueError("batch_size must be divisible by distributed world_size")
+    if (args.batch_size // distributed.world_size) % args.instances != 0:
+        raise ValueError("local batch_size must be divisible by instances")
 
 
 def _validate_multi_gpu_args(args: Namespace) -> None:

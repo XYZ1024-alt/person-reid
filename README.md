@@ -35,14 +35,18 @@ than 0. To disable these speed options:
 --precision fp32 --no-pin-memory --no-persistent-workers
 ```
 
-For single-process multi-GPU training, add:
+For distributed multi-GPU training, launch with `torchrun` and add
+`--distributed`:
 
 ```powershell
---multi-gpu
+torchrun --nproc_per_node=2 -m scripts.train --distributed
 ```
 
-`--multi-gpu` uses PyTorch `DataParallel` over all visible CUDA GPUs and fails
-explicitly if fewer than two GPUs are visible.
+`--distributed` uses PyTorch `DistributedDataParallel`. It requires `torchrun`
+and fails explicitly if the distributed environment is missing. In distributed
+training, `--batch-size` is the global batch size and is split evenly across
+GPUs. The older `--multi-gpu` flag still uses single-process `DataParallel` and
+is kept only for compatibility.
 
 CAL requires clothes labels, so `--cal-weight` defaults to `0.5` and should be
 used with PRCC or joint training. Market-1501 does not provide clothes labels.
@@ -80,7 +84,7 @@ quality across the ranked list instead of only the first match.
 ### ExpT1: Market-only Pretraining
 
 ```powershell
-python -m scripts.train --mode market --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --color-jitter-probability 0.2 --random-grayscale-probability 0 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --output-dir outputs/transfer/expT1_market_pretrain
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 80 --batch-size 512 --num-workers 12 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --color-jitter-probability 0.2 --random-grayscale-probability 0 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --output-dir outputs/transfer/expT1_market_pretrain
 ```
 
 ### ExpT2: Market to Joint Transfer with PRCC Constraints
@@ -89,7 +93,7 @@ This stage uses Market + PRCC, source-balanced identity sampling, PRCC sketch
 consistency, clothes-aware PRCC identity sampling, and CAL:
 
 ```powershell
-python -m scripts.train --mode joint --epochs 60 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT1_market_pretrain/best.pth --output-dir outputs/transfer/expT2_market_to_joint_sketch_cal_balanced
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode joint --epochs 60 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT1_market_pretrain/best.pth --output-dir outputs/transfer/expT2_market_to_joint_sketch_cal_balanced
 ```
 
 ### ExpT3: Joint to PRCC Fine-tuning
@@ -99,7 +103,7 @@ PRCC. Since it is PRCC-only, it uses clothes-aware identity sampling instead of
 source-balanced Market/PRCC sampling:
 
 ```powershell
-python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --output-dir outputs/transfer/expT3_joint_to_prcc_sketch_cal
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --output-dir outputs/transfer/expT3_joint_to_prcc_sketch_cal
 ```
 
 Evaluate the transfer stages:

@@ -166,13 +166,14 @@ def _clothes_classifier(embedding_dim: int, num_clothes_classes: int) -> nn.Line
     return nn.Linear(embedding_dim, num_clothes_classes, bias=True)
 
 
-def load_imagenet_pretrained_backbone(backbone: ResNet50IBNBackbone) -> int:
+def load_imagenet_pretrained_backbone(backbone: ResNet50IBNBackbone, *, verbose: bool = True) -> int:
     from torchvision.models import ResNet50_Weights, resnet50
 
     source = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).state_dict()
     loaded = _load_stem(backbone, source)
     loaded += _load_resnet_layers(backbone, source)
-    print(f"{IMAGENET_LOADED_PREFIX}: {loaded}")
+    if verbose:
+        print(f"{IMAGENET_LOADED_PREFIX}: {loaded}")
     return loaded
 
 

@@ -39,25 +39,38 @@ def build_eval_loader(root: str | Path, dataset_name: str, split: str, variant: 
     return DataLoader(dataset, batch_size=args.batch_size, **_eval_loader_kwargs(args))
 
 
-def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
+def build_train_loader(dataset: ReIDDataset, args: Namespace, distributed=None) -> DataLoader:
+    batch_size = _train_batch_size(args, distributed)
     if _use_source_balanced_sampling(args):
         config = SourceBalancedSamplerConfig(
             samples=dataset.samples,
-            batch_size=args.batch_size,
+            batch_size=batch_size,
             instances=args.instances,
             source_ratio=args.prcc_identities_ratio,
+            epoch_batch_size=args.batch_size,
         )
         sampler = SourceBalancedIdentityBatchSampler(config)
         return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
     if args.mode == MODE_PRCC:
-        sampler = ClothesAwareIdentityBatchSampler(dataset.samples, args.batch_size, args.instances)
+        sampler = ClothesAwareIdentityBatchSampler(
+            dataset.samples,
+            batch_size,
+            args.instances,
+            epoch_batch_size=args.batch_size,
+        )
         return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
-    sampler = IdentityBatchSampler(dataset.samples, args.batch_size, args.instances)
+    sampler = IdentityBatchSampler(dataset.samples, batch_size, args.instances, epoch_batch_size=args.batch_size)
     return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
 
 
 def _use_source_balanced_sampling(args: Namespace) -> bool:
     return args.mode == MODE_JOINT and not args.disable_source_balanced_sampling
+
+
+def _train_batch_size(args: Namespace, distributed) -> int:
+    if not getattr(distributed, "enabled", False):
+        return args.batch_size
+    return args.batch_size // distributed.world_size
 
 
 def _training_transform_config(args: Namespace) -> TransformConfig:
