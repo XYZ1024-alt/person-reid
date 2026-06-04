@@ -6,6 +6,7 @@ import torch
 
 from robust_person_reid.builders import MODE_MARKET, MODE_PRCC
 from robust_person_reid.engine.evaluator import evaluate_checkpoint
+from robust_person_reid.runtime import configure_torch_runtime
 
 
 DEFAULT_BATCH_SIZE = 64
@@ -34,6 +35,7 @@ def default_root(dataset: str) -> str:
 
 
 def main() -> None:
+    configure_torch_runtime()
     evaluate_checkpoint(parse_args())
 
 

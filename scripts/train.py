@@ -7,6 +7,7 @@ import torch
 from robust_person_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
 from robust_person_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from robust_person_reid.engine.trainer import train_from_args
+from robust_person_reid.runtime import configure_torch_runtime
 
 
 DEFAULT_EPOCHS = 60
@@ -105,6 +106,7 @@ def default_precision() -> str:
 
 
 def main() -> None:
+    configure_torch_runtime()
     train_from_args(parse_args())
 
 

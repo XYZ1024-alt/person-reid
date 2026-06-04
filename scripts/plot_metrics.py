@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from robust_person_reid.builders import MODE_MARKET, MODE_PRCC, build_eval_loader
 from robust_person_reid.data.transforms import VARIANT_STANDARD
 from robust_person_reid.engine.evaluator import extract_feature_bank, load_model
+from robust_person_reid.runtime import configure_torch_runtime
 
 
 DEFAULT_OUTPUT_DIR = "outputs/robust_person_reid"
@@ -52,6 +53,7 @@ def default_root(dataset: str) -> str:
 
 
 def main() -> None:
+    configure_torch_runtime()
     args = parse_args()
     fig_dir = Path(args.fig_dir)
     fig_dir.mkdir(parents=True, exist_ok=True)
