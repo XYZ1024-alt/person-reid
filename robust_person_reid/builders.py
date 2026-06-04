@@ -13,6 +13,7 @@ from robust_person_reid.data.datasets import (
     relabel_samples,
 )
 from robust_person_reid.data.samplers import (
+    ClothesAwareIdentityBatchSampler,
     IdentityBatchSampler,
     SourceBalancedIdentityBatchSampler,
     SourceBalancedSamplerConfig,
@@ -47,6 +48,9 @@ def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
             source_ratio=args.prcc_identities_ratio,
         )
         sampler = SourceBalancedIdentityBatchSampler(config)
+        return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
+    if args.mode == MODE_PRCC:
+        sampler = ClothesAwareIdentityBatchSampler(dataset.samples, args.batch_size, args.instances)
         return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
     sampler = IdentityBatchSampler(dataset.samples, args.batch_size, args.instances)
     return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))

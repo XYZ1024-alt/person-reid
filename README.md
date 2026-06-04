@@ -51,6 +51,9 @@ each batch's identities from PRCC. PRCC sketch images are used as training-only
 pose/shape supervision by default; evaluation and deployment still use RGB only.
 CAL uses PRCC outfit-level labels: each person's A/B images are one outfit and
 C images are another outfit.
+PRCC sampling is clothes-aware: for each sampled PRCC identity, the `--instances`
+images must cover at least two clothes labels, so `--instances 4` samples from
+both outfit states instead of four same-outfit images.
 
 Useful PRCC options:
 
@@ -59,63 +62,53 @@ Useful PRCC options:
 --prcc-identities-ratio 0.5 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --disable-source-balanced-sampling
 ```
 
-## Ablation
+## Transfer Training
 
-Run PRCC-focused ablation with separate output folders:
+The recommended training path is Market pretraining followed by PRCC-aware
+transfer. Market first teaches standard RGB ReID. Joint and PRCC stages then
+use PRCC sketch, CAL, and PRCC-balanced sampling to reduce clothing-color
+dependence. ExpT1 Market-only training does not use balanced sampling because
+there is no PRCC source or clothes label to balance.
 
-```powershell
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/ablation/baseline
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0 --disable-source-balanced-sampling --output-dir outputs/ablation/sketch_id
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2 --disable-source-balanced-sampling --output-dir outputs/ablation/sketch_consistency
-python -m scripts.train --mode joint --epochs 80 --batch-size 256 --num-workers 8 --cal-weight 0.05 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2 --prcc-identities-ratio 0.5 --output-dir outputs/ablation/full
-```
+`--pretrained-checkpoint` loads only compatible backbone, embedding, and BNNeck
+weights. It intentionally skips identity and clothes classifiers.
 
-Evaluate both PRCC and Market-1501 for each run:
-
-```powershell
-python -m scripts.evaluate --checkpoint outputs/ablation/baseline/best.pth --dataset prcc
-python -m scripts.evaluate --checkpoint outputs/ablation/baseline/best.pth --dataset market
-```
-
-Repeat the evaluation command for `sketch_id`, `sketch_consistency`, and `full`.
-
-## Accuracy Tuning Stage 1
-
-The current strongest baseline is RGB-only joint training. First test small CAL
-weights without sketch or source-balanced sampling:
+### ExpT1: Market-only Pretraining
 
 ```powershell
-python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expA_rgb_baseline
-python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0.02 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expB_cal002
-python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expC_cal003
-python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0.05 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expD_cal005
+python -m scripts.train --mode market --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0 --no-use-prcc-sketch --output-dir outputs/transfer/expT1_market_pretrain
 ```
 
-Evaluate each run on PRCC and Market before trying sketch again.
+### ExpT2: Market to Joint Transfer with PRCC Constraints
 
-## Accuracy Tuning Stage 2
-
-Stage 2 fine-tunes PRCC from the best stage 1 RGB checkpoint. It loads only the
-compatible backbone, embedding, and BNNeck weights from `--pretrained-checkpoint`;
-the PRCC identity classifier is trained from scratch. Sketch consistency is a
-small structure-only target and does not use sketch identity CE/triplet when
-`--sketch-loss-weight 0` is set.
+This stage uses Market + PRCC, source-balanced identity sampling, PRCC sketch
+consistency, clothes-aware PRCC identity sampling, and CAL:
 
 ```powershell
-python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expE_prcc_finetune_rgb
-python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.01 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expF_prcc_sketch_con001
-python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expG_prcc_sketch_con002
-python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.05 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expH_prcc_sketch_con005
+python -m scripts.train --mode joint --epochs 60 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --pretrained-checkpoint outputs/transfer/expT1_market_pretrain/best.pth --output-dir outputs/transfer/expT2_market_to_joint_sketch_cal_balanced
 ```
 
-Evaluate each stage 2 run on PRCC:
+### ExpT3: Joint to PRCC Fine-tuning
+
+This stage keeps PRCC sketch consistency and CAL, then optimizes directly on
+PRCC. Since it is PRCC-only, it uses clothes-aware identity sampling instead of
+source-balanced Market/PRCC sampling:
 
 ```powershell
-python -m scripts.evaluate --checkpoint outputs/stage2/expE_prcc_finetune_rgb/best.pth --dataset prcc
-python -m scripts.evaluate --checkpoint outputs/stage2/expF_prcc_sketch_con001/best.pth --dataset prcc
-python -m scripts.evaluate --checkpoint outputs/stage2/expG_prcc_sketch_con002/best.pth --dataset prcc
-python -m scripts.evaluate --checkpoint outputs/stage2/expH_prcc_sketch_con005/best.pth --dataset prcc
+python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --output-dir outputs/transfer/expT3_joint_to_prcc_sketch_cal
 ```
+
+Evaluate the transfer stages:
+
+```powershell
+python -m scripts.evaluate --checkpoint outputs/transfer/expT1_market_pretrain/best.pth --dataset market
+python -m scripts.evaluate --checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --dataset market
+python -m scripts.evaluate --checkpoint outputs/transfer/expT3_joint_to_prcc_sketch_cal/best.pth --dataset prcc
+```
+
+Historical full/sketch ablations were kept for comparison only; the transfer
+path above is the current main experiment line.
 
 ## Evaluate
 

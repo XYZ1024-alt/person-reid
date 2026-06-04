@@ -77,11 +77,13 @@ def load_partial_pretrained_checkpoint(model: RobustPersonReIDNet, path: str) ->
     source = checkpoint["model"]
     target = model.state_dict()
     selected = _partial_pretrained_state(source, target)
+    skipped_heads = _count_head_parameters(source)
     if not selected:
         raise ValueError(f"No compatible partial pretrained parameters found in {path}")
     target.update(selected)
     model.load_state_dict(target)
     print(f"Loaded partial pretrained parameters: {len(selected)} from {path}")
+    print(f"Skipped classifier parameters: {skipped_heads}")
     print(f"Partial pretrained prefixes: {PARTIAL_PRETRAIN_PREFIXES}")
 
 
@@ -102,6 +104,14 @@ def _strip_module_prefix(key: str) -> str:
 
 def _is_partial_pretrain_key(key: str) -> bool:
     return key.startswith(PARTIAL_PRETRAIN_PREFIXES)
+
+
+def _count_head_parameters(source: dict[str, torch.Tensor]) -> int:
+    return sum(1 for key in source if _is_head_key(_strip_module_prefix(key)))
+
+
+def _is_head_key(key: str) -> bool:
+    return key.startswith(("classifier.", "clothes_classifier."))
 
 
 def _build_grad_scaler(args: Namespace, device: torch.device):
