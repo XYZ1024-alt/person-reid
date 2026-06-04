@@ -467,15 +467,23 @@ def _sketch_consistency_loss(model, sketch_images: torch.Tensor, rgb_features: t
 
 
 def _extract_sketch_targets(model, sketch_images: torch.Tensor, device, args) -> dict[str, torch.Tensor]:
-    was_training = model.training
+    training_modes = _module_training_modes(model)
     model.eval()
     try:
         with torch.no_grad():
             with _autocast_context(args, device):
                 return model(sketch_images)
     finally:
-        if was_training:
-            model.train()
+        _restore_module_training_modes(training_modes)
+
+
+def _module_training_modes(model) -> dict[torch.nn.Module, bool]:
+    return {module: module.training for module in model.modules()}
+
+
+def _restore_module_training_modes(training_modes: dict[torch.nn.Module, bool]) -> None:
+    for module, training in training_modes.items():
+        module.train(training)
 
 
 def _optional_triplet(features: torch.Tensor, labels: torch.Tensor, margin: float) -> torch.Tensor:
