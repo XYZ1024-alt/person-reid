@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from robust_person_reid.builders import build_train_loader, build_training_dataset
-from robust_person_reid.engine.evaluator import evaluate_enabled_datasets, primary_rank1
+from robust_person_reid.engine.evaluator import evaluate_enabled_datasets, primary_eval_metric
 from robust_person_reid.modules.losses import batch_hard_triplet_loss
 from robust_person_reid.modules.model import RobustPersonReIDNet, load_imagenet_pretrained_backbone
 
@@ -32,6 +32,9 @@ TRAIN_METRIC_FIELDS = [
     "effective_sketch_consistency_weight",
 ]
 EVAL_METRIC_FIELDS = ["rank1", "rank2", "rank3", "rank4", "rank5", "mAP"]
+BEST_METRIC_RANK1 = "rank1"
+BEST_METRIC_MAP = "mAP"
+BEST_METRIC_CHOICES = {BEST_METRIC_RANK1, BEST_METRIC_MAP}
 NO_CAL_LOSS = 0.0
 NO_SKETCH_LOSS = 0.0
 PRECISION_FP16 = "fp16"
@@ -185,6 +188,8 @@ def validate_training_args(args: Namespace) -> None:
         raise ValueError("sketch_ramp_epochs must be >= 0")
     if args.resume and args.pretrained_checkpoint:
         raise ValueError("--resume and --pretrained-checkpoint are mutually exclusive")
+    if args.best_metric not in BEST_METRIC_CHOICES:
+        raise ValueError(f"best_metric must be one of {sorted(BEST_METRIC_CHOICES)}, got {args.best_metric}")
     _validate_probability_args(args)
     _validate_multi_gpu_args(args)
 
@@ -196,10 +201,10 @@ def _validate_probability_args(args: Namespace) -> None:
             raise ValueError(f"{name} must be in [0, 1], got {value}")
 
 
-def save_checkpoint(path: Path, model, optimizer, epoch: int, metric: float, dataset) -> None:
+def save_checkpoint(path: Path, model, optimizer, epoch: int, metric_name: str, metric_value: float, dataset) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"model": _unwrap_model(model).state_dict(), "optimizer": optimizer.state_dict()}
-    payload.update(_checkpoint_metadata(epoch, metric, dataset))
+    payload.update(_checkpoint_metadata(epoch, metric_name, metric_value, dataset))
     torch.save(payload, path)
 
 
@@ -213,17 +218,20 @@ def load_checkpoint(path: str, model, optimizer) -> int:
 
 
 def run_training(model, loader, optimizer, scaler, start_epoch: int, dataset, device, args) -> None:
-    best_rank1 = 0.0
+    best_metric_value = 0.0
     output_dir = Path(args.output_dir)
     _initialize_metric_files(output_dir, start_epoch)
-    print(f"precision={args.precision} pin_memory={args.pin_memory} persistent_workers={_loader_has_persistent_workers(loader)}")
+    print(
+        f"precision={args.precision} best_metric={args.best_metric} "
+        f"pin_memory={args.pin_memory} persistent_workers={_loader_has_persistent_workers(loader)}"
+    )
     for epoch in range(start_epoch, args.epochs):
         print(f"epoch={epoch + 1}/{args.epochs}")
         metrics = train_one_epoch(model, loader, optimizer, scaler, device, args, epoch)
         _print_epoch(epoch, metrics)
         _write_train_metrics(output_dir, epoch, metrics)
         if (epoch + 1) % args.eval_period == 0 or epoch + 1 == args.epochs:
-            best_rank1 = _evaluate_and_save(model, optimizer, epoch, dataset, best_rank1, device, args)
+            best_metric_value = _evaluate_and_save(model, optimizer, epoch, dataset, best_metric_value, device, args)
 
 
 def _train_batch(
@@ -330,14 +338,15 @@ def _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss,
 
 def _evaluate_and_save(model, optimizer, epoch: int, dataset, best: float, device, args) -> float:
     eval_metrics = evaluate_enabled_datasets(model, device, args)
-    selected_rank1 = primary_rank1(eval_metrics)
+    selected_metric = primary_eval_metric(eval_metrics, args.best_metric)
     output_dir = Path(args.output_dir)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
-    save_checkpoint(output_dir / CHECKPOINT_LAST, model, optimizer, epoch, selected_rank1, dataset)
-    if selected_rank1 <= best:
+    save_checkpoint(output_dir / CHECKPOINT_LAST, model, optimizer, epoch, args.best_metric, selected_metric, dataset)
+    if selected_metric <= best:
         return best
-    save_checkpoint(output_dir / CHECKPOINT_BEST, model, optimizer, epoch, selected_rank1, dataset)
-    return selected_rank1
+    save_checkpoint(output_dir / CHECKPOINT_BEST, model, optimizer, epoch, args.best_metric, selected_metric, dataset)
+    print(f"new_best {args.best_metric}={selected_metric:.4f}")
+    return selected_metric
 
 
 def _accumulate(totals: dict[str, float], losses: dict[str, torch.Tensor]) -> None:
@@ -442,10 +451,11 @@ def _cal_loss(outputs: dict[str, torch.Tensor], clothes_labels: torch.Tensor, ca
     return F.cross_entropy(outputs["clothes_logits"][known].float(), clothes_labels[known])
 
 
-def _checkpoint_metadata(epoch: int, metric: float, dataset) -> dict[str, int | float]:
+def _checkpoint_metadata(epoch: int, metric_name: str, metric_value: float, dataset) -> dict[str, int | float | str]:
     return {
         "epoch": epoch,
-        "rank1": metric,
+        "best_metric": metric_name,
+        "best_metric_value": metric_value,
         "num_classes": dataset.num_classes,
         "num_clothes_classes": dataset.num_clothes_classes,
     }

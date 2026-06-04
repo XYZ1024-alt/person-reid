@@ -31,6 +31,7 @@ DEFAULT_EVAL_PERIOD = 5
 DEFAULT_SEED = 42
 DEFAULT_PIN_MEMORY = True
 DEFAULT_MULTI_GPU = False
+DEFAULT_BEST_METRIC = "rank1"
 DEFAULT_FLIP_PROBABILITY = 0.5
 DEFAULT_COLOR_JITTER_PROBABILITY = 0.5
 DEFAULT_RANDOM_GRAYSCALE_PROBABILITY = 0.0
@@ -69,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--precision", choices=[PRECISION_FP16, PRECISION_FP32], default=default_precision())
     parser.add_argument("--multi-gpu", action=argparse.BooleanOptionalAction, default=DEFAULT_MULTI_GPU)
     add_augmentation_args(parser)
+    parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", default="")

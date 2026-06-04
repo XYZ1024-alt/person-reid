@@ -74,11 +74,13 @@ there is no PRCC source or clothes label to balance.
 
 `--pretrained-checkpoint` loads only compatible backbone, embedding, and BNNeck
 weights. It intentionally skips identity and clothes classifiers.
+Use `--best-metric mAP` for paper runs so `best.pth` is selected by retrieval
+quality across the ranked list instead of only the first match.
 
 ### ExpT1: Market-only Pretraining
 
 ```powershell
-python -m scripts.train --mode market --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0 --no-use-prcc-sketch --color-jitter-probability 0.2 --random-grayscale-probability 0 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --output-dir outputs/transfer/expT1_market_pretrain
+python -m scripts.train --mode market --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --color-jitter-probability 0.2 --random-grayscale-probability 0 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --output-dir outputs/transfer/expT1_market_pretrain
 ```
 
 ### ExpT2: Market to Joint Transfer with PRCC Constraints
@@ -87,7 +89,7 @@ This stage uses Market + PRCC, source-balanced identity sampling, PRCC sketch
 consistency, clothes-aware PRCC identity sampling, and CAL:
 
 ```powershell
-python -m scripts.train --mode joint --epochs 60 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT1_market_pretrain/best.pth --output-dir outputs/transfer/expT2_market_to_joint_sketch_cal_balanced
+python -m scripts.train --mode joint --epochs 60 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT1_market_pretrain/best.pth --output-dir outputs/transfer/expT2_market_to_joint_sketch_cal_balanced
 ```
 
 ### ExpT3: Joint to PRCC Fine-tuning
@@ -97,7 +99,7 @@ PRCC. Since it is PRCC-only, it uses clothes-aware identity sampling instead of
 source-balanced Market/PRCC sampling:
 
 ```powershell
-python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --output-dir outputs/transfer/expT3_joint_to_prcc_sketch_cal
+python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --output-dir outputs/transfer/expT3_joint_to_prcc_sketch_cal
 ```
 
 Evaluate the transfer stages:
