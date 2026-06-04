@@ -32,6 +32,7 @@ DEFAULT_SEED = 42
 DEFAULT_PIN_MEMORY = True
 DEFAULT_MULTI_GPU = False
 DEFAULT_DISTRIBUTED = False
+DEFAULT_DDP_FIND_UNUSED_PARAMETERS = "auto"
 DEFAULT_BEST_METRIC = "rank1"
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
@@ -73,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--precision", choices=[PRECISION_FP16, PRECISION_FP32], default=default_precision())
     parser.add_argument("--multi-gpu", action=argparse.BooleanOptionalAction, default=DEFAULT_MULTI_GPU)
     parser.add_argument("--distributed", action=argparse.BooleanOptionalAction, default=DEFAULT_DISTRIBUTED)
+    parser.add_argument("--ddp-find-unused-parameters", choices=["auto", "true", "false"], default=DEFAULT_DDP_FIND_UNUSED_PARAMETERS)
     add_augmentation_args(parser)
     parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)

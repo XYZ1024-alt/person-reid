@@ -45,7 +45,9 @@ PRECISION_FP16 = "fp16"
 PRECISION_FP32 = "fp32"
 CUDA_DEVICE_TYPE = "cuda"
 DDP_BACKEND = "nccl"
-DDP_FIND_UNUSED_PARAMETERS = True
+DDP_FIND_UNUSED_AUTO = "auto"
+DDP_FIND_UNUSED_TRUE = "true"
+DDP_FIND_UNUSED_FALSE = "false"
 ENV_RANK = "RANK"
 ENV_WORLD_SIZE = "WORLD_SIZE"
 ENV_LOCAL_RANK = "LOCAL_RANK"
@@ -197,17 +199,18 @@ def configure_parallel_model(
     distributed: DistributedContext,
 ) -> torch.nn.Module:
     if distributed.enabled:
+        find_unused_parameters = ddp_find_unused_parameters(args)
         rank_zero_print(
             distributed,
             f"distributed=True world_size={distributed.world_size} "
             f"local_batch_size={args.batch_size // distributed.world_size} "
-            f"find_unused_parameters={DDP_FIND_UNUSED_PARAMETERS}",
+            f"find_unused_parameters={find_unused_parameters}",
         )
         return DistributedDataParallel(
             model,
             device_ids=[distributed.local_rank],
             output_device=distributed.local_rank,
-            find_unused_parameters=DDP_FIND_UNUSED_PARAMETERS,
+            find_unused_parameters=find_unused_parameters,
         )
     if not args.multi_gpu:
         return model
@@ -220,6 +223,28 @@ def _require_distributed_env() -> None:
     missing = [name for name in (ENV_RANK, ENV_WORLD_SIZE, ENV_LOCAL_RANK) if name not in os.environ]
     if missing:
         raise RuntimeError(f"--distributed must be launched with torchrun; missing env vars: {missing}")
+
+
+def ddp_find_unused_parameters(args: Namespace) -> bool:
+    if args.ddp_find_unused_parameters == DDP_FIND_UNUSED_TRUE:
+        return True
+    if args.ddp_find_unused_parameters == DDP_FIND_UNUSED_FALSE:
+        return False
+    return _needs_ddp_unused_parameter_detection(args)
+
+
+def _needs_ddp_unused_parameter_detection(args: Namespace) -> bool:
+    return _cal_has_inactive_epochs(args) or _sketch_path_is_conditional(args)
+
+
+def _cal_has_inactive_epochs(args: Namespace) -> bool:
+    return args.cal_weight > NO_CAL_LOSS and args.cal_warmup_epochs > 0
+
+
+def _sketch_path_is_conditional(args: Namespace) -> bool:
+    if not args.use_prcc_sketch:
+        return False
+    return args.sketch_loss_weight > NO_SKETCH_LOSS or args.rgb_sketch_consistency_weight > NO_SKETCH_LOSS
 
 
 def configure_backbone_freeze(model, args: Namespace, epoch: int, distributed: DistributedContext) -> None:
@@ -306,6 +331,8 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
         raise ValueError("sketch_ramp_epochs must be >= 0")
     if args.eval_period <= 0:
         raise ValueError("eval_period must be > 0")
+    if args.ddp_find_unused_parameters not in {DDP_FIND_UNUSED_AUTO, DDP_FIND_UNUSED_TRUE, DDP_FIND_UNUSED_FALSE}:
+        raise ValueError("ddp_find_unused_parameters must be one of: auto, true, false")
     if args.resume and args.pretrained_checkpoint:
         raise ValueError("--resume and --pretrained-checkpoint are mutually exclusive")
     if args.best_metric not in BEST_METRIC_CHOICES:

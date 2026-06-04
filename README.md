@@ -47,6 +47,9 @@ and fails explicitly if the distributed environment is missing. In distributed
 training, `--batch-size` is the global batch size and is split evenly across
 GPUs. The older `--multi-gpu` flag still uses single-process `DataParallel` and
 is kept only for compatibility.
+`--ddp-find-unused-parameters auto` disables DDP unused-parameter detection for
+simple stages such as Market-only pretraining, and enables it when warmup or
+conditional sketch/CAL paths can temporarily leave parameters unused.
 
 CAL requires clothes labels, so `--cal-weight` defaults to `0.5` and should be
 used with PRCC or joint training. Market-1501 does not provide clothes labels.
@@ -70,52 +73,121 @@ Useful PRCC options:
 
 ## Transfer Training
 
-The recommended training path is Market pretraining followed by PRCC-aware
-transfer. Market first teaches standard RGB ReID. Joint and PRCC stages then
-use PRCC sketch, CAL, and PRCC-balanced sampling to reduce clothing-color
-dependence. ExpT1 Market-only training does not use balanced sampling because
-there is no PRCC source or clothes label to balance.
+The recommended training path is a five-stage transfer sequence:
+
+```text
+ExpT1: Market clean pretraining
+ExpT2: Market dark adaptation
+ExpT3: Market occlusion adaptation
+ExpT4: Market to joint PRCC transfer
+ExpT5: PRCC fine-tuning
+```
+
+Market first teaches standard RGB ReID. Dark and occlusion adaptation then add
+scene robustness without disrupting the first clean pretraining stage. Joint and
+PRCC stages use PRCC sketch, CAL, and PRCC-balanced sampling to reduce
+clothing-color dependence. Market-only stages do not use balanced sampling
+because there is no PRCC source or clothes label to balance.
 
 `--pretrained-checkpoint` loads only compatible backbone, embedding, and BNNeck
 weights. It intentionally skips identity and clothes classifiers.
 Use `--best-metric mAP` for paper runs so `best.pth` is selected by retrieval
 quality across the ranked list instead of only the first match.
-During transfer, `--freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2`
+During PRCC transfer, `--freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2`
 keeps low-level ResNet50-IBN features fixed at the start, then automatically
 unfreezes them after epoch 10.
 
-### ExpT1: Market-only Pretraining
+Run the full five-stage transfer experiment:
 
-```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 80 --batch-size 512 --num-workers 12 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --eval-period 10 --color-jitter-probability 0.2 --random-grayscale-probability 0 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --output-dir outputs/transfer/expT1_market_pretrain
+```bash
+bash scripts/run_transfer.sh
 ```
 
-### ExpT2: Market to Joint Transfer with PRCC Constraints
+Resume from a later stage after previous checkpoints already exist:
+
+```bash
+START_STAGE=4 bash scripts/run_transfer.sh
+```
+
+Useful script overrides:
+
+```bash
+GPUS=2 BATCH_SIZE=512 NUM_WORKERS=12 EXP_ROOT=outputs/transfer bash scripts/run_transfer.sh
+```
+
+### ExpT1: Market Clean Pretraining
+
+This stage learns standard Market-1501 ReID without dark or occlusion
+augmentation:
+
+```powershell
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 80 --batch-size 512 --num-workers 12 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --eval-period 10 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0 --occlusion-augment-probability 0 --output-dir outputs/transfer/expT1_market_clean
+```
+
+Evaluate ExpT1:
+
+```powershell
+python -m scripts.evaluate --checkpoint outputs/transfer/expT1_market_clean/best.pth --dataset market
+```
+
+### ExpT2: Market Dark Adaptation
+
+This stage loads ExpT1 and adapts the Market model to low-light queries:
+
+```powershell
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 20 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --eval-period 10 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0.15 --occlusion-augment-probability 0 --pretrained-checkpoint outputs/transfer/expT1_market_clean/best.pth --output-dir outputs/transfer/expT2_market_dark
+```
+
+Evaluate ExpT2:
+
+```powershell
+python -m scripts.evaluate --checkpoint outputs/transfer/expT2_market_dark/best.pth --dataset market
+```
+
+### ExpT3: Market Occlusion Adaptation
+
+This stage loads ExpT2 and adapts the Market model to occluded queries:
+
+```powershell
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 20 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --eval-period 10 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_dark/best.pth --output-dir outputs/transfer/expT3_market_occlusion
+```
+
+Evaluate ExpT3:
+
+```powershell
+python -m scripts.evaluate --checkpoint outputs/transfer/expT3_market_occlusion/best.pth --dataset market
+```
+
+### ExpT4: Market to Joint PRCC Transfer
 
 This stage uses Market + PRCC, source-balanced identity sampling, PRCC sketch
 consistency, clothes-aware PRCC identity sampling, and CAL:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode joint --epochs 60 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --eval-period 10 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT1_market_pretrain/best.pth --output-dir outputs/transfer/expT2_market_to_joint_sketch_cal_balanced
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode joint --epochs 60 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --eval-period 10 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
 ```
 
-### ExpT3: Joint to PRCC Fine-tuning
+Evaluate ExpT4:
+
+```powershell
+python -m scripts.evaluate --checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --dataset market
+python -m scripts.evaluate --checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --dataset prcc
+```
+
+### ExpT5: PRCC Fine-tuning
 
 This stage keeps PRCC sketch consistency and CAL, then optimizes directly on
 PRCC. Since it is PRCC-only, it uses clothes-aware identity sampling instead of
 source-balanced Market/PRCC sampling:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --eval-period 10 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --output-dir outputs/transfer/expT3_joint_to_prcc_sketch_cal
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --eval-period 10 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --output-dir outputs/transfer/expT5_prcc_finetune
 ```
 
-Evaluate the transfer stages:
+Evaluate ExpT5:
 
 ```powershell
-python -m scripts.evaluate --checkpoint outputs/transfer/expT1_market_pretrain/best.pth --dataset market
-python -m scripts.evaluate --checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --dataset prcc
-python -m scripts.evaluate --checkpoint outputs/transfer/expT2_market_to_joint_sketch_cal_balanced/best.pth --dataset market
-python -m scripts.evaluate --checkpoint outputs/transfer/expT3_joint_to_prcc_sketch_cal/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/transfer/expT5_prcc_finetune/best.pth --dataset prcc
 ```
 
 Historical full/sketch ablations were kept for comparison only; the transfer
