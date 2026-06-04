@@ -89,8 +89,9 @@ PRCC stages use PRCC sketch, CAL, and PRCC-balanced sampling to reduce
 clothing-color dependence. Market-only stages do not use balanced sampling
 because there is no PRCC source or clothes label to balance.
 
-`--pretrained-checkpoint` loads only compatible backbone, embedding, and BNNeck
-weights. It intentionally skips identity and clothes classifiers.
+`--pretrained-checkpoint` loads every checkpoint parameter whose name and shape
+match the current model. Market-to-Market stages keep the identity classifier,
+while transfer stages skip classifiers automatically when class counts change.
 Use `--best-metric mAP` for paper runs so `best.pth` is selected by retrieval
 quality across the ranked list instead of only the first match.
 During PRCC transfer, `--freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2`

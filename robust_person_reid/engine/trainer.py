@@ -52,7 +52,7 @@ ENV_RANK = "RANK"
 ENV_WORLD_SIZE = "WORLD_SIZE"
 ENV_LOCAL_RANK = "LOCAL_RANK"
 FREEZABLE_BACKBONE_LAYERS = {"stem", "layer1", "layer2", "layer3", "layer4"}
-PARTIAL_PRETRAIN_PREFIXES = ("backbone.", "embedding.", "bnneck.")
+PRETRAIN_SKIP_PREVIEW_LIMIT = 10
 AUGMENT_PROBABILITY_ARGS = (
     "flip_probability",
     "color_jitter_probability",
@@ -105,33 +105,39 @@ def initialize_model_weights(model: RobustPersonReIDNet, args: Namespace, distri
     if args.resume:
         return
     if args.pretrained_checkpoint:
-        load_partial_pretrained_checkpoint(model, args.pretrained_checkpoint, distributed)
+        load_compatible_pretrained_checkpoint(model, args.pretrained_checkpoint, distributed)
         return
     load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
 
 
-def load_partial_pretrained_checkpoint(model: RobustPersonReIDNet, path: str, distributed: DistributedContext) -> None:
+def load_compatible_pretrained_checkpoint(model: RobustPersonReIDNet, path: str, distributed: DistributedContext) -> None:
     checkpoint = torch.load(path, map_location="cpu")
     source = checkpoint["model"]
     target = model.state_dict()
-    selected = _partial_pretrained_state(source, target)
-    skipped_heads = _count_head_parameters(source)
+    selected, skipped = _compatible_pretrained_state(source, target)
     if not selected:
-        raise ValueError(f"No compatible partial pretrained parameters found in {path}")
+        raise ValueError(f"No compatible pretrained parameters found in {path}")
     target.update(selected)
     model.load_state_dict(target)
-    rank_zero_print(distributed, f"Loaded partial pretrained parameters: {len(selected)} from {path}")
-    rank_zero_print(distributed, f"Skipped classifier parameters: {skipped_heads}")
-    rank_zero_print(distributed, f"Partial pretrained prefixes: {PARTIAL_PRETRAIN_PREFIXES}")
+    loaded_heads = _count_head_parameters(selected)
+    rank_zero_print(distributed, f"Loaded compatible pretrained parameters: {len(selected)} from {path}")
+    rank_zero_print(distributed, f"Loaded compatible classifier parameters: {loaded_heads}")
+    _print_skipped_pretrained_parameters(distributed, skipped)
 
 
-def _partial_pretrained_state(source: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def _compatible_pretrained_state(
+    source: dict[str, torch.Tensor],
+    target: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], list[str]]:
     selected = {}
+    skipped = []
     for key, value in source.items():
         clean_key = _strip_module_prefix(key)
-        if clean_key in target and _is_partial_pretrain_key(clean_key) and target[clean_key].shape == value.shape:
+        if clean_key in target and target[clean_key].shape == value.shape:
             selected[clean_key] = value
-    return selected
+            continue
+        skipped.append(clean_key)
+    return selected, skipped
 
 
 def _strip_module_prefix(key: str) -> str:
@@ -140,16 +146,20 @@ def _strip_module_prefix(key: str) -> str:
     return key
 
 
-def _is_partial_pretrain_key(key: str) -> bool:
-    return key.startswith(PARTIAL_PRETRAIN_PREFIXES)
-
-
 def _count_head_parameters(source: dict[str, torch.Tensor]) -> int:
     return sum(1 for key in source if _is_head_key(_strip_module_prefix(key)))
 
 
 def _is_head_key(key: str) -> bool:
     return key.startswith(("classifier.", "clothes_classifier."))
+
+
+def _print_skipped_pretrained_parameters(distributed: DistributedContext, skipped: list[str]) -> None:
+    if not skipped:
+        return
+    preview = ", ".join(skipped[:PRETRAIN_SKIP_PREVIEW_LIMIT])
+    rank_zero_print(distributed, f"Skipped incompatible pretrained parameters: {len(skipped)}")
+    rank_zero_print(distributed, f"Skipped incompatible preview: {preview}")
 
 
 def _build_grad_scaler(args: Namespace, device: torch.device):
