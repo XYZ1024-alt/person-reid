@@ -27,12 +27,14 @@ DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT = 0.2
 DEFAULT_SKETCH_WARMUP_EPOCHS = 0
 DEFAULT_SKETCH_RAMP_EPOCHS = 0
 DEFAULT_WORKERS = 4
-DEFAULT_EVAL_PERIOD = 5
+DEFAULT_EVAL_PERIOD = 10
 DEFAULT_SEED = 42
 DEFAULT_PIN_MEMORY = True
 DEFAULT_MULTI_GPU = False
 DEFAULT_DISTRIBUTED = False
 DEFAULT_BEST_METRIC = "rank1"
+DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
+DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
 DEFAULT_FLIP_PROBABILITY = 0.5
 DEFAULT_COLOR_JITTER_PROBABILITY = 0.5
 DEFAULT_RANDOM_GRAYSCALE_PROBABILITY = 0.0
@@ -73,6 +75,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distributed", action=argparse.BooleanOptionalAction, default=DEFAULT_DISTRIBUTED)
     add_augmentation_args(parser)
     parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
+    parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
+    parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", default="")

@@ -49,6 +49,7 @@ DDP_FIND_UNUSED_PARAMETERS = True
 ENV_RANK = "RANK"
 ENV_WORLD_SIZE = "WORLD_SIZE"
 ENV_LOCAL_RANK = "LOCAL_RANK"
+FREEZABLE_BACKBONE_LAYERS = {"stem", "layer1", "layer2", "layer3", "layer4"}
 PARTIAL_PRETRAIN_PREFIXES = ("backbone.", "embedding.", "bnneck.")
 AUGMENT_PROBABILITY_ARGS = (
     "flip_probability",
@@ -174,7 +175,7 @@ def initialize_distributed(args: Namespace) -> DistributedContext:
     world_size = int(os.environ[ENV_WORLD_SIZE])
     local_rank = int(os.environ[ENV_LOCAL_RANK])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend=DDP_BACKEND)
+    dist.init_process_group(backend=DDP_BACKEND, device_id=torch.device(CUDA_DEVICE_TYPE, local_rank))
     return DistributedContext(True, rank, world_size, local_rank)
 
 
@@ -221,6 +222,39 @@ def _require_distributed_env() -> None:
         raise RuntimeError(f"--distributed must be launched with torchrun; missing env vars: {missing}")
 
 
+def configure_backbone_freeze(model, args: Namespace, epoch: int, distributed: DistributedContext) -> None:
+    layers = _freeze_backbone_layers(args)
+    if not layers:
+        return
+    freeze = epoch < args.freeze_backbone_epochs
+    base_model = _unwrap_model(model)
+    changed = _set_backbone_layers_trainable(base_model, layers, not freeze)
+    _set_frozen_backbone_layers_eval(base_model, layers, freeze)
+    if changed:
+        action = "frozen" if freeze else "unfrozen"
+        rank_zero_print(distributed, f"backbone_layers_{action}={','.join(layers)} epoch={epoch + 1}")
+
+
+def _set_backbone_layers_trainable(model, layer_names: list[str], trainable: bool) -> int:
+    changed = 0
+    for layer_name in layer_names:
+        for parameter in getattr(model.backbone, layer_name).parameters():
+            changed += int(parameter.requires_grad != trainable)
+            parameter.requires_grad = trainable
+    return changed
+
+
+def _set_frozen_backbone_layers_eval(model, layer_names: list[str], freeze: bool) -> None:
+    if not freeze:
+        return
+    for layer_name in layer_names:
+        getattr(model.backbone, layer_name).eval()
+
+
+def _freeze_backbone_layers(args: Namespace) -> list[str]:
+    return [name.strip() for name in args.freeze_backbone_layers.split(",") if name.strip()]
+
+
 def train_one_epoch(
     model,
     loader,
@@ -232,6 +266,7 @@ def train_one_epoch(
     distributed: DistributedContext,
 ) -> dict[str, float]:
     model.train()
+    configure_backbone_freeze(model, args, epoch, distributed)
     totals = _empty_epoch_totals()
     effective_cal_weight = _effective_cal_weight(args, epoch)
     effective_consistency_weight = _effective_sketch_consistency_weight(args, epoch)
@@ -269,10 +304,13 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
         raise ValueError("sketch_warmup_epochs must be >= 0")
     if args.sketch_ramp_epochs < 0:
         raise ValueError("sketch_ramp_epochs must be >= 0")
+    if args.eval_period <= 0:
+        raise ValueError("eval_period must be > 0")
     if args.resume and args.pretrained_checkpoint:
         raise ValueError("--resume and --pretrained-checkpoint are mutually exclusive")
     if args.best_metric not in BEST_METRIC_CHOICES:
         raise ValueError(f"best_metric must be one of {sorted(BEST_METRIC_CHOICES)}, got {args.best_metric}")
+    _validate_freeze_args(args)
     _validate_probability_args(args)
     _validate_parallel_args(args, distributed)
 
@@ -282,6 +320,17 @@ def _validate_probability_args(args: Namespace) -> None:
         value = getattr(args, name)
         if value < 0.0 or value > 1.0:
             raise ValueError(f"{name} must be in [0, 1], got {value}")
+
+
+def _validate_freeze_args(args: Namespace) -> None:
+    if args.freeze_backbone_epochs < 0:
+        raise ValueError("freeze_backbone_epochs must be >= 0")
+    layers = _freeze_backbone_layers(args)
+    if args.freeze_backbone_epochs > 0 and not layers:
+        raise ValueError("freeze_backbone_layers must not be empty when freeze_backbone_epochs > 0")
+    invalid = set(layers) - FREEZABLE_BACKBONE_LAYERS
+    if invalid:
+        raise ValueError(f"Unknown freeze_backbone_layers: {sorted(invalid)}")
 
 
 def save_checkpoint(path: Path, model, optimizer, epoch: int, metric_name: str, metric_value: float, dataset) -> None:
@@ -597,6 +646,9 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
     parts = [
         f"precision={args.precision}",
         f"best_metric={args.best_metric}",
+        f"eval_period={args.eval_period}",
+        f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
+        f"freeze_backbone_layers={args.freeze_backbone_layers}",
         f"pin_memory={args.pin_memory}",
         f"persistent_workers={_loader_has_persistent_workers(loader)}",
     ]
