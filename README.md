@@ -35,6 +35,15 @@ than 0. To disable these speed options:
 --precision fp32 --no-pin-memory --no-persistent-workers
 ```
 
+For single-process multi-GPU training, add:
+
+```powershell
+--multi-gpu
+```
+
+`--multi-gpu` uses PyTorch `DataParallel` over all visible CUDA GPUs and fails
+explicitly if fewer than two GPUs are visible.
+
 CAL requires clothes labels, so `--cal-weight` defaults to `0.5` and should be
 used with PRCC or joint training. Market-1501 does not provide clothes labels.
 Joint training uses source-balanced identity sampling by default, with half of
@@ -69,6 +78,44 @@ python -m scripts.evaluate --checkpoint outputs/ablation/baseline/best.pth --dat
 ```
 
 Repeat the evaluation command for `sketch_id`, `sketch_consistency`, and `full`.
+
+## Accuracy Tuning Stage 1
+
+The current strongest baseline is RGB-only joint training. First test small CAL
+weights without sketch or source-balanced sampling:
+
+```powershell
+python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expA_rgb_baseline
+python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0.02 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expB_cal002
+python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expC_cal003
+python -m scripts.train --mode joint --epochs 80 --batch-size 512 --num-workers 12 --multi-gpu --cal-weight 0.05 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --no-use-prcc-sketch --disable-source-balanced-sampling --output-dir outputs/stage1/expD_cal005
+```
+
+Evaluate each run on PRCC and Market before trying sketch again.
+
+## Accuracy Tuning Stage 2
+
+Stage 2 fine-tunes PRCC from the best stage 1 RGB checkpoint. It loads only the
+compatible backbone, embedding, and BNNeck weights from `--pretrained-checkpoint`;
+the PRCC identity classifier is trained from scratch. Sketch consistency is a
+small structure-only target and does not use sketch identity CE/triplet when
+`--sketch-loss-weight 0` is set.
+
+```powershell
+python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expE_prcc_finetune_rgb
+python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.01 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expF_prcc_sketch_con001
+python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expG_prcc_sketch_con002
+python -m scripts.train --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --multi-gpu --lr 0.0001 --cal-weight 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.05 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --pretrained-checkpoint outputs/stage1/expA_rgb_baseline/best.pth --output-dir outputs/stage2/expH_prcc_sketch_con005
+```
+
+Evaluate each stage 2 run on PRCC:
+
+```powershell
+python -m scripts.evaluate --checkpoint outputs/stage2/expE_prcc_finetune_rgb/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/stage2/expF_prcc_sketch_con001/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/stage2/expG_prcc_sketch_con002/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/stage2/expH_prcc_sketch_con005/best.pth --dataset prcc
+```
 
 ## Evaluate
 

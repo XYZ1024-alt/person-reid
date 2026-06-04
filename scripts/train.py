@@ -24,10 +24,13 @@ DEFAULT_PRCC_IDENTITIES_RATIO = 0.5
 DEFAULT_USE_PRCC_SKETCH = True
 DEFAULT_SKETCH_LOSS_WEIGHT = 0.5
 DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT = 0.2
+DEFAULT_SKETCH_WARMUP_EPOCHS = 0
+DEFAULT_SKETCH_RAMP_EPOCHS = 0
 DEFAULT_WORKERS = 4
 DEFAULT_EVAL_PERIOD = 5
 DEFAULT_SEED = 42
 DEFAULT_PIN_MEMORY = True
+DEFAULT_MULTI_GPU = False
 PRECISION_FP16 = "fp16"
 PRECISION_FP32 = "fp32"
 
@@ -53,13 +56,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-prcc-sketch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PRCC_SKETCH)
     parser.add_argument("--sketch-loss-weight", type=float, default=DEFAULT_SKETCH_LOSS_WEIGHT)
     parser.add_argument("--rgb-sketch-consistency-weight", type=float, default=DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT)
+    parser.add_argument("--sketch-warmup-epochs", type=int, default=DEFAULT_SKETCH_WARMUP_EPOCHS)
+    parser.add_argument("--sketch-ramp-epochs", type=int, default=DEFAULT_SKETCH_RAMP_EPOCHS)
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=DEFAULT_PIN_MEMORY)
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--precision", choices=[PRECISION_FP16, PRECISION_FP32], default=default_precision())
+    parser.add_argument("--multi-gpu", action=argparse.BooleanOptionalAction, default=DEFAULT_MULTI_GPU)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", default="")
+    parser.add_argument("--pretrained-checkpoint", default="")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 
