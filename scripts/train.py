@@ -31,6 +31,11 @@ DEFAULT_EVAL_PERIOD = 5
 DEFAULT_SEED = 42
 DEFAULT_PIN_MEMORY = True
 DEFAULT_MULTI_GPU = False
+DEFAULT_FLIP_PROBABILITY = 0.5
+DEFAULT_COLOR_JITTER_PROBABILITY = 0.5
+DEFAULT_RANDOM_GRAYSCALE_PROBABILITY = 0.0
+DEFAULT_DARK_AUGMENT_PROBABILITY = 0.10
+DEFAULT_OCCLUSION_AUGMENT_PROBABILITY = 0.10
 PRECISION_FP16 = "fp16"
 PRECISION_FP32 = "fp32"
 
@@ -63,12 +68,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--precision", choices=[PRECISION_FP16, PRECISION_FP32], default=default_precision())
     parser.add_argument("--multi-gpu", action=argparse.BooleanOptionalAction, default=DEFAULT_MULTI_GPU)
+    add_augmentation_args(parser)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", default="")
     parser.add_argument("--pretrained-checkpoint", default="")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
+
+
+def add_augmentation_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--flip-probability", type=float, default=DEFAULT_FLIP_PROBABILITY)
+    parser.add_argument("--color-jitter-probability", type=float, default=DEFAULT_COLOR_JITTER_PROBABILITY)
+    parser.add_argument("--random-grayscale-probability", type=float, default=DEFAULT_RANDOM_GRAYSCALE_PROBABILITY)
+    parser.add_argument("--dark-augment-probability", type=float, default=DEFAULT_DARK_AUGMENT_PROBABILITY)
+    parser.add_argument("--occlusion-augment-probability", type=float, default=DEFAULT_OCCLUSION_AUGMENT_PROBABILITY)
 
 
 def default_precision() -> str:

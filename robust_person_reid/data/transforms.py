@@ -12,8 +12,10 @@ IMAGE_WIDTH = 128
 RGB_CHANNELS = 3
 PIXEL_SCALE = 255.0
 FLIP_PROBABILITY = 0.5
-DARK_PROBABILITY = 0.25
-OCCLUSION_PROBABILITY = 0.5
+COLOR_JITTER_PROBABILITY = 0.5
+RANDOM_GRAYSCALE_PROBABILITY = 0.0
+DARK_PROBABILITY = 0.10
+OCCLUSION_PROBABILITY = 0.10
 DARK_FACTOR_MIN = 0.30
 DARK_FACTOR_MAX = 0.75
 BRIGHTNESS_MIN = 0.85
@@ -35,6 +37,11 @@ class TransformConfig:
     width: int = IMAGE_WIDTH
     train: bool = False
     variant: str = VARIANT_STANDARD
+    flip_probability: float = FLIP_PROBABILITY
+    color_jitter_probability: float = COLOR_JITTER_PROBABILITY
+    random_grayscale_probability: float = RANDOM_GRAYSCALE_PROBABILITY
+    dark_probability: float = DARK_PROBABILITY
+    occlusion_probability: float = OCCLUSION_PROBABILITY
 
 
 class ReIDTransform:
@@ -51,7 +58,7 @@ class ReIDTransform:
     def pair(self, image: Image.Image, sketch: Image.Image) -> tuple[torch.Tensor, torch.Tensor]:
         image = _resize_rgb(image, self.config)
         sketch = _resize_rgb(sketch, self.config)
-        if self.config.train and random.random() < FLIP_PROBABILITY:
+        if _train_event(self.config.train, self.config.flip_probability):
             image = _flip(image)
             sketch = _flip(sketch)
         image = self._apply_non_geometric_image_augments(image)
@@ -60,20 +67,22 @@ class ReIDTransform:
         return _normalize(tensor), _normalize(sketch_tensor)
 
     def _apply_image_augments(self, image: Image.Image) -> Image.Image:
-        if self.config.train and random.random() < FLIP_PROBABILITY:
+        if _train_event(self.config.train, self.config.flip_probability):
             image = _flip(image)
         return self._apply_non_geometric_image_augments(image)
 
     def _apply_non_geometric_image_augments(self, image: Image.Image) -> Image.Image:
-        if self.config.train:
+        if _train_event(self.config.train, self.config.color_jitter_probability):
             image = _jitter_image(image)
-        if self.config.variant == VARIANT_DARK or _train_event(self.config.train, DARK_PROBABILITY):
+        if _train_event(self.config.train, self.config.random_grayscale_probability):
+            image = _grayscale_image(image)
+        if self.config.variant == VARIANT_DARK or _train_event(self.config.train, self.config.dark_probability):
             image = _darken_image(image)
         return image
 
     def _apply_tensor_augments(self, tensor: torch.Tensor) -> torch.Tensor:
         should_occlude = self.config.variant == VARIANT_OCCLUDED
-        if should_occlude or _train_event(self.config.train, OCCLUSION_PROBABILITY):
+        if should_occlude or _train_event(self.config.train, self.config.occlusion_probability):
             return _occlude_tensor(tensor)
         return tensor
 
@@ -109,6 +118,10 @@ def _jitter_image(image: Image.Image) -> Image.Image:
 def _darken_image(image: Image.Image) -> Image.Image:
     factor = random.uniform(DARK_FACTOR_MIN, DARK_FACTOR_MAX)
     return ImageEnhance.Brightness(image).enhance(factor)
+
+
+def _grayscale_image(image: Image.Image) -> Image.Image:
+    return image.convert("L").convert("RGB")
 
 
 def _occlude_tensor(tensor: torch.Tensor) -> torch.Tensor:

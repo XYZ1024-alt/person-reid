@@ -28,7 +28,7 @@ MODE_JOINT = "joint"
 
 def build_training_dataset(args: Namespace) -> ReIDDataset:
     samples = _training_samples(args)
-    transform = ReIDTransform(TransformConfig(train=True))
+    transform = ReIDTransform(_training_transform_config(args))
     return ReIDDataset(relabel_samples(samples), transform)
 
 
@@ -58,6 +58,17 @@ def build_train_loader(dataset: ReIDDataset, args: Namespace) -> DataLoader:
 
 def _use_source_balanced_sampling(args: Namespace) -> bool:
     return args.mode == MODE_JOINT and not args.disable_source_balanced_sampling
+
+
+def _training_transform_config(args: Namespace) -> TransformConfig:
+    return TransformConfig(
+        train=True,
+        flip_probability=args.flip_probability,
+        color_jitter_probability=args.color_jitter_probability,
+        random_grayscale_probability=args.random_grayscale_probability,
+        dark_probability=args.dark_augment_probability,
+        occlusion_probability=args.occlusion_augment_probability,
+    )
 
 
 def _loader_kwargs(args: Namespace) -> dict:

@@ -38,6 +38,13 @@ PRECISION_FP16 = "fp16"
 PRECISION_FP32 = "fp32"
 CUDA_DEVICE_TYPE = "cuda"
 PARTIAL_PRETRAIN_PREFIXES = ("backbone.", "embedding.", "bnneck.")
+AUGMENT_PROBABILITY_ARGS = (
+    "flip_probability",
+    "color_jitter_probability",
+    "random_grayscale_probability",
+    "dark_augment_probability",
+    "occlusion_augment_probability",
+)
 
 
 def train_from_args(args: Namespace) -> None:
@@ -178,7 +185,15 @@ def validate_training_args(args: Namespace) -> None:
         raise ValueError("sketch_ramp_epochs must be >= 0")
     if args.resume and args.pretrained_checkpoint:
         raise ValueError("--resume and --pretrained-checkpoint are mutually exclusive")
+    _validate_probability_args(args)
     _validate_multi_gpu_args(args)
+
+
+def _validate_probability_args(args: Namespace) -> None:
+    for name in AUGMENT_PROBABILITY_ARGS:
+        value = getattr(args, name)
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"{name} must be in [0, 1], got {value}")
 
 
 def save_checkpoint(path: Path, model, optimizer, epoch: int, metric: float, dataset) -> None:
