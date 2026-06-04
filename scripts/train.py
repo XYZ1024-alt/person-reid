@@ -5,6 +5,7 @@ import argparse
 import torch
 
 from robust_person_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
+from robust_person_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from robust_person_reid.engine.trainer import train_from_args
 
 
@@ -34,6 +35,7 @@ DEFAULT_MULTI_GPU = False
 DEFAULT_DISTRIBUTED = False
 DEFAULT_DDP_FIND_UNUSED_PARAMETERS = "auto"
 DEFAULT_BEST_METRIC = "rank1"
+DEFAULT_BEST_VARIANT = VARIANT_STANDARD
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
 DEFAULT_FLIP_PROBABILITY = 0.5
@@ -77,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ddp-find-unused-parameters", choices=["auto", "true", "false"], default=DEFAULT_DDP_FIND_UNUSED_PARAMETERS)
     add_augmentation_args(parser)
     parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
+    parser.add_argument("--best-variant", choices=[VARIANT_STANDARD, VARIANT_DARK, VARIANT_OCCLUDED], default=DEFAULT_BEST_VARIANT)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
     parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)

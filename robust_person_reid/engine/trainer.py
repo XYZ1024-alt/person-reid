@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from robust_person_reid.builders import build_train_loader, build_training_dataset
 from robust_person_reid.engine.evaluator import evaluate_enabled_datasets, primary_eval_metric
+from robust_person_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from robust_person_reid.modules.losses import batch_hard_triplet_loss
 from robust_person_reid.modules.model import RobustPersonReIDNet, load_imagenet_pretrained_backbone
 
@@ -39,6 +40,7 @@ EVAL_METRIC_FIELDS = ["rank1", "rank2", "rank3", "rank4", "rank5", "mAP"]
 BEST_METRIC_RANK1 = "rank1"
 BEST_METRIC_MAP = "mAP"
 BEST_METRIC_CHOICES = {BEST_METRIC_RANK1, BEST_METRIC_MAP}
+BEST_VARIANT_CHOICES = {VARIANT_STANDARD, VARIANT_DARK, VARIANT_OCCLUDED}
 NO_CAL_LOSS = 0.0
 NO_SKETCH_LOSS = 0.0
 PRECISION_FP16 = "fp16"
@@ -347,6 +349,8 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
         raise ValueError("--resume and --pretrained-checkpoint are mutually exclusive")
     if args.best_metric not in BEST_METRIC_CHOICES:
         raise ValueError(f"best_metric must be one of {sorted(BEST_METRIC_CHOICES)}, got {args.best_metric}")
+    if args.best_variant not in BEST_VARIANT_CHOICES:
+        raise ValueError(f"best_variant must be one of {sorted(BEST_VARIANT_CHOICES)}, got {args.best_variant}")
     _validate_freeze_args(args)
     _validate_probability_args(args)
     _validate_parallel_args(args, distributed)
@@ -370,10 +374,10 @@ def _validate_freeze_args(args: Namespace) -> None:
         raise ValueError(f"Unknown freeze_backbone_layers: {sorted(invalid)}")
 
 
-def save_checkpoint(path: Path, model, optimizer, epoch: int, metric_name: str, metric_value: float, dataset) -> None:
+def save_checkpoint(path: Path, model, optimizer, epoch: int, metric_name: str, metric_value: float, dataset, variant: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"model": _unwrap_model(model).state_dict(), "optimizer": optimizer.state_dict()}
-    payload.update(_checkpoint_metadata(epoch, metric_name, metric_value, dataset))
+    payload.update(_checkpoint_metadata(epoch, metric_name, metric_value, dataset, variant))
     torch.save(payload, path)
 
 
@@ -515,14 +519,14 @@ def _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss,
 def _evaluate_and_save(model, optimizer, epoch: int, dataset, best: float, device, args) -> float:
     eval_model = _unwrap_model(model)
     eval_metrics = evaluate_enabled_datasets(eval_model, device, args)
-    selected_metric = primary_eval_metric(eval_metrics, args.best_metric)
+    selected_metric = primary_eval_metric(eval_metrics, args.best_metric, args.best_variant)
     output_dir = Path(args.output_dir)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
-    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, epoch, args.best_metric, selected_metric, dataset)
+    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, epoch, args.best_metric, selected_metric, dataset, args.best_variant)
     if selected_metric <= best:
         return best
-    save_checkpoint(output_dir / CHECKPOINT_BEST, eval_model, optimizer, epoch, args.best_metric, selected_metric, dataset)
-    print(f"new_best {args.best_metric}={selected_metric:.4f}")
+    save_checkpoint(output_dir / CHECKPOINT_BEST, eval_model, optimizer, epoch, args.best_metric, selected_metric, dataset, args.best_variant)
+    print(f"new_best {args.best_variant}/{args.best_metric}={selected_metric:.4f}")
     return selected_metric
 
 
@@ -640,10 +644,11 @@ def _cal_loss(outputs: dict[str, torch.Tensor], clothes_labels: torch.Tensor, ca
     return F.cross_entropy(outputs["clothes_logits"][known].float(), clothes_labels[known])
 
 
-def _checkpoint_metadata(epoch: int, metric_name: str, metric_value: float, dataset) -> dict[str, int | float | str]:
+def _checkpoint_metadata(epoch: int, metric_name: str, metric_value: float, dataset, variant: str) -> dict[str, int | float | str]:
     return {
         "epoch": epoch,
         "best_metric": metric_name,
+        "best_variant": variant,
         "best_metric_value": metric_value,
         "num_classes": dataset.num_classes,
         "num_clothes_classes": dataset.num_clothes_classes,
@@ -691,6 +696,7 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
     parts = [
         f"precision={args.precision}",
         f"best_metric={args.best_metric}",
+        f"best_variant={args.best_variant}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",

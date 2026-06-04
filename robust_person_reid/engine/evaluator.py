@@ -43,17 +43,19 @@ def enabled_eval_jobs(args: Namespace) -> list[EvalJob]:
     return jobs
 
 
-def primary_eval_metric(eval_results, metric_name: str) -> float:
+def primary_eval_metric(eval_results, metric_name: str, variant: str) -> float:
     for job, metrics in eval_results:
         if job.name == MODE_PRCC:
-            return _standard_metric(metrics, metric_name)
-    return _standard_metric(eval_results[0][1], metric_name)
+            return _variant_metric(metrics, metric_name, variant)
+    return _variant_metric(eval_results[0][1], metric_name, variant)
 
 
-def _standard_metric(metrics: dict[str, dict[str, float]], metric_name: str) -> float:
-    if metric_name not in metrics[VARIANT_STANDARD]:
+def _variant_metric(metrics: dict[str, dict[str, float]], metric_name: str, variant: str) -> float:
+    if variant not in metrics:
+        raise ValueError(f"Unknown evaluation variant: {variant}")
+    if metric_name not in metrics[variant]:
         raise ValueError(f"Unknown evaluation metric: {metric_name}")
-    return metrics[VARIANT_STANDARD][metric_name]
+    return metrics[variant][metric_name]
 
 
 def evaluate_checkpoint(args: Namespace) -> None:

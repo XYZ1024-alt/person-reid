@@ -48,6 +48,7 @@ run_stage 1 train_distributed \
   --cal-weight 0 \
   --no-use-prcc-sketch \
   --best-metric mAP \
+  --best-variant standard \
   --eval-period 10 \
   --color-jitter-probability 0 \
   --random-grayscale-probability 0 \
@@ -65,6 +66,7 @@ run_stage 2 train_distributed \
   --cal-weight 0 \
   --no-use-prcc-sketch \
   --best-metric mAP \
+  --best-variant dark \
   --eval-period 10 \
   --color-jitter-probability 0.1 \
   --random-grayscale-probability 0 \
@@ -83,6 +85,7 @@ run_stage 3 train_distributed \
   --cal-weight 0 \
   --no-use-prcc-sketch \
   --best-metric mAP \
+  --best-variant occluded \
   --eval-period 10 \
   --color-jitter-probability 0.1 \
   --random-grayscale-probability 0 \
@@ -107,6 +110,7 @@ run_stage 4 train_distributed \
   --sketch-ramp-epochs 10 \
   --prcc-identities-ratio 0.5 \
   --best-metric mAP \
+  --best-variant standard \
   --eval-period 10 \
   --freeze-backbone-epochs 10 \
   --freeze-backbone-layers stem,layer1,layer2 \
@@ -133,6 +137,7 @@ run_stage 5 train_distributed \
   --sketch-warmup-epochs 5 \
   --sketch-ramp-epochs 10 \
   --best-metric mAP \
+  --best-variant standard \
   --eval-period 10 \
   --color-jitter-probability 0.5 \
   --random-grayscale-probability 0.25 \
