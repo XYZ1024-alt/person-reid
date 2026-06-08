@@ -91,16 +91,29 @@ def load_prcc_samples(root: str | Path, split: str, use_sketch: bool = False) ->
 
 def relabel_samples(samples: list[ReidSample]) -> list[ReidSample]:
     label_by_identity = _label_map((sample.source, sample.pid) for sample in samples if not sample.is_junk)
-    return [_with_relabel(sample, label_by_identity) for sample in samples]
+    label_by_outfit = _label_map(_outfit_key(sample) for sample in samples if _has_known_outfit(sample))
+    return [_with_relabel(sample, label_by_identity, label_by_outfit) for sample in samples]
 
 
 def _with_relabel(
     sample: ReidSample,
     label_by_identity: dict[tuple[str, int], int],
+    label_by_outfit: dict[tuple[str, int, int], int],
 ) -> ReidSample:
     if sample.is_junk:
         return replace(sample, label=JUNK_LABEL)
-    return replace(sample, label=label_by_identity[(sample.source, sample.pid)])
+    identity_label = label_by_identity[(sample.source, sample.pid)]
+    if sample.clothes_id == UNKNOWN_CLOTHES:
+        return replace(sample, label=identity_label)
+    return replace(sample, label=identity_label, clothes_id=label_by_outfit[_outfit_key(sample)])
+
+
+def _has_known_outfit(sample: ReidSample) -> bool:
+    return not sample.is_junk and sample.clothes_id != UNKNOWN_CLOTHES
+
+
+def _outfit_key(sample: ReidSample) -> tuple[str, int, int]:
+    return sample.source, sample.pid, sample.clothes_id
 
 
 def _label_map(identities) -> dict:

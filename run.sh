@@ -110,22 +110,22 @@ run_stage 3 evaluate_market "$EXP3/best.pth"
 
 run_stage 4 train_distributed \
   --mode joint \
-  --epochs 40 \
+  --epochs 30 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
-  --lr 0.00005 \
+  --lr 0.0001 \
   --cal-weight 0.01 \
-  --cal-warmup-epochs 15 \
+  --cal-warmup-epochs 20 \
   --cal-ramp-epochs 20 \
   --sketch-loss-weight 0 \
-  --rgb-sketch-consistency-weight 0 \
+  --rgb-sketch-consistency-weight 0.02 \
   --sketch-warmup-epochs 10 \
   --sketch-ramp-epochs 10 \
   --prcc-identities-ratio 0.5 \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 10 \
-  --lr-milestones 20,30 \
+  --lr-milestones 30 \
   --freeze-backbone-epochs 10 \
   --freeze-backbone-layers stem,layer1,layer2 \
   --color-jitter-probability 0.5 \
