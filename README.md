@@ -35,6 +35,11 @@ than 0. To disable these speed options:
 --precision fp32 --no-pin-memory --no-persistent-workers
 ```
 
+Training uses `MultiStepLR` by default with `--lr-milestones 40,70,100`
+and `--lr-gamma 0.1`. Each run writes `run_config.json` to the output
+directory with the full argument set, dataset summary, loader summary, DDP
+summary, scheduler settings, and pretrained parameter count.
+
 For distributed multi-GPU training, launch with `torchrun` and add
 `--distributed`:
 
@@ -115,7 +120,7 @@ START_STAGE=4 bash run.sh
 Useful script overrides:
 
 ```bash
-GPUS=2 BATCH_SIZE=512 NUM_WORKERS=12 EXP_ROOT=outputs/transfer bash run.sh
+GPUS=2 BATCH_SIZE=128 NUM_WORKERS=12 EXP_ROOT=outputs/transfer bash run.sh
 ```
 
 ### ExpT1: Market Clean Pretraining
@@ -124,7 +129,7 @@ This stage learns standard Market-1501 ReID without dark or occlusion
 augmentation:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 80 --batch-size 512 --num-workers 12 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --best-variant standard --eval-period 10 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0 --occlusion-augment-probability 0 --output-dir outputs/transfer/expT1_market_clean
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 120 --batch-size 128 --num-workers 12 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --best-variant standard --eval-period 5 --lr-milestones 40,70,100 --color-jitter-probability 0.5 --random-grayscale-probability 0 --dark-augment-probability 0.10 --occlusion-augment-probability 0.10 --output-dir outputs/transfer/expT1_market_clean
 ```
 
 Evaluate ExpT1:
@@ -138,7 +143,7 @@ python -m scripts.evaluate --checkpoint outputs/transfer/expT1_market_clean/best
 This stage loads ExpT1 and adapts the Market model to low-light queries:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 20 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --best-variant dark --eval-period 10 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0.15 --occlusion-augment-probability 0 --pretrained-checkpoint outputs/transfer/expT1_market_clean/best.pth --output-dir outputs/transfer/expT2_market_dark
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 30 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --best-variant dark --eval-period 10 --lr-milestones 10,20 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0.15 --occlusion-augment-probability 0 --pretrained-checkpoint outputs/transfer/expT1_market_clean/best.pth --output-dir outputs/transfer/expT2_market_dark
 ```
 
 Evaluate ExpT2:
@@ -152,7 +157,7 @@ python -m scripts.evaluate --checkpoint outputs/transfer/expT2_market_dark/best.
 This stage loads ExpT2 and adapts the Market model to occluded queries:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 20 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --best-variant occluded --eval-period 10 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_dark/best.pth --output-dir outputs/transfer/expT3_market_occlusion
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode market --epochs 30 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0 --no-use-prcc-sketch --best-metric mAP --best-variant occluded --eval-period 10 --lr-milestones 10,20 --color-jitter-probability 0.1 --random-grayscale-probability 0 --dark-augment-probability 0 --occlusion-augment-probability 0.2 --pretrained-checkpoint outputs/transfer/expT2_market_dark/best.pth --output-dir outputs/transfer/expT3_market_occlusion
 ```
 
 Evaluate ExpT3:
@@ -167,7 +172,7 @@ This stage uses Market + PRCC, source-balanced identity sampling, PRCC sketch
 consistency, clothes-aware PRCC identity sampling, and CAL:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode joint --epochs 60 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --best-variant standard --eval-period 10 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode joint --epochs 80 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --best-variant standard --eval-period 10 --lr-milestones 30,55,70 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
 ```
 
 Evaluate ExpT4:
@@ -184,7 +189,7 @@ PRCC. Since it is PRCC-only, it uses clothes-aware identity sampling instead of
 source-balanced Market/PRCC sampling:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode prcc --epochs 40 --batch-size 512 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --best-variant standard --eval-period 10 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --output-dir outputs/transfer/expT5_prcc_finetune
+torchrun --nproc_per_node=2 -m scripts.train --distributed --mode prcc --epochs 30 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --best-variant standard --eval-period 10 --lr-milestones 10,20 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --output-dir outputs/transfer/expT5_prcc_finetune
 ```
 
 Evaluate ExpT5:

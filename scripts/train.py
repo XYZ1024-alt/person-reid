@@ -41,6 +41,8 @@ DEFAULT_BEST_VARIANT = VARIANT_STANDARD
 DEFAULT_FEATURE_KEY = REID_FEATURE_KEY
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
+DEFAULT_LR_MILESTONES = "40,70,100"
+DEFAULT_LR_GAMMA = 0.1
 DEFAULT_FLIP_PROBABILITY = 0.5
 DEFAULT_COLOR_JITTER_PROBABILITY = 0.5
 DEFAULT_RANDOM_GRAYSCALE_PROBABILITY = 0.0
@@ -86,6 +88,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_FEATURE_KEY)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
     parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
+    parser.add_argument("--lr-milestones", default=DEFAULT_LR_MILESTONES)
+    parser.add_argument("--lr-gamma", type=float, default=DEFAULT_LR_GAMMA)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--resume", default="")

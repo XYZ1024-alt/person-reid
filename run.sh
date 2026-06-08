@@ -2,11 +2,17 @@
 set -euo pipefail
 
 GPUS="${GPUS:-2}"
-BATCH_SIZE="${BATCH_SIZE:-256}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
 START_STAGE="${START_STAGE:-1}"
+STOP_STAGE="${STOP_STAGE:-4}"
 TORCHRUN="${TORCHRUN:-torchrun}"
 PYTHON="${PYTHON:-python}"
+
+if [[ -z "${OMP_NUM_THREADS:-}" || ! "${OMP_NUM_THREADS}" =~ ^[0-9]+$ || "${OMP_NUM_THREADS}" -lt 1 ]]; then
+  echo "set OMP_NUM_THREADS=1 (was '${OMP_NUM_THREADS:-unset}')"
+  export OMP_NUM_THREADS=1
+fi
 
 EXP_ROOT="${EXP_ROOT:-outputs/transfer}"
 EXP1="${EXP_ROOT}/expT1_market_clean"
@@ -19,6 +25,10 @@ run_stage() {
   local stage="$1"
   shift
   if (( stage < START_STAGE )); then
+    echo "skip ExpT${stage}"
+    return
+  fi
+  if (( stage > STOP_STAGE )); then
     echo "skip ExpT${stage}"
     return
   fi
@@ -49,11 +59,12 @@ run_stage 1 train_distributed \
   --no-use-prcc-sketch \
   --best-metric mAP \
   --best-variant standard \
-  --eval-period 10 \
-  --color-jitter-probability 0 \
+  --eval-period 5 \
+  --lr-milestones 40,70,100 \
+  --color-jitter-probability 0.5 \
   --random-grayscale-probability 0 \
-  --dark-augment-probability 0 \
-  --occlusion-augment-probability 0 \
+  --dark-augment-probability 0.10 \
+  --occlusion-augment-probability 0.10 \
   --output-dir "$EXP1"
 run_stage 1 evaluate_market "$EXP1/best.pth"
 
@@ -68,6 +79,7 @@ run_stage 2 train_distributed \
   --best-metric mAP \
   --best-variant dark \
   --eval-period 10 \
+  --lr-milestones 10,20 \
   --color-jitter-probability 0.1 \
   --random-grayscale-probability 0 \
   --dark-augment-probability 0.15 \
@@ -87,6 +99,7 @@ run_stage 3 train_distributed \
   --best-metric mAP \
   --best-variant occluded \
   --eval-period 10 \
+  --lr-milestones 10,20 \
   --color-jitter-probability 0.1 \
   --random-grayscale-probability 0 \
   --dark-augment-probability 0 \
@@ -97,21 +110,22 @@ run_stage 3 evaluate_market "$EXP3/best.pth"
 
 run_stage 4 train_distributed \
   --mode joint \
-  --epochs 80 \
+  --epochs 40 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
-  --lr 0.0001 \
-  --cal-weight 0.03 \
-  --cal-warmup-epochs 20 \
+  --lr 0.00005 \
+  --cal-weight 0.01 \
+  --cal-warmup-epochs 15 \
   --cal-ramp-epochs 20 \
   --sketch-loss-weight 0 \
-  --rgb-sketch-consistency-weight 0.02 \
+  --rgb-sketch-consistency-weight 0 \
   --sketch-warmup-epochs 10 \
   --sketch-ramp-epochs 10 \
   --prcc-identities-ratio 0.5 \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 10 \
+  --lr-milestones 20,30 \
   --freeze-backbone-epochs 10 \
   --freeze-backbone-layers stem,layer1,layer2 \
   --color-jitter-probability 0.5 \
@@ -125,7 +139,7 @@ run_stage 4 evaluate_prcc "$EXP4/best.pth"
 
 run_stage 5 train_distributed \
   --mode prcc \
-  --epochs 50 \
+  --epochs 30 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --lr 0.0001 \
@@ -139,6 +153,7 @@ run_stage 5 train_distributed \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 10 \
+  --lr-milestones 10,20 \
   --color-jitter-probability 0.5 \
   --random-grayscale-probability 0.25 \
   --dark-augment-probability 0.05 \
