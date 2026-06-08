@@ -1,6 +1,6 @@
-# RobustPersonReID
+# PedestrianReID
 
-This project now has a standalone pure PyTorch ReID path under `robust_person_reid`.
+This project now has a standalone pure PyTorch ReID path under `pedestrian_reid`.
 It uses a pure PyTorch ResNet50-IBN backbone with BNNeck and CAL.
 It initializes the custom ResNet50-IBN backbone from ImageNet ResNet50 weights.
 It does not use external ReID frameworks.
@@ -199,8 +199,8 @@ path above is the current main experiment line.
 ## Evaluate
 
 ```powershell
-python -m scripts.evaluate --checkpoint outputs/robust_person_reid/best.pth --dataset market
-python -m scripts.evaluate --checkpoint outputs/robust_person_reid/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/pedestrian_reid/best.pth --dataset market
+python -m scripts.evaluate --checkpoint outputs/pedestrian_reid/best.pth --dataset prcc
 ```
 
 Evaluation reports standard, dark-query, and occluded-query Rank-1/Rank-5/mAP.
@@ -210,8 +210,8 @@ Evaluation reports standard, dark-query, and occluded-query Rank-1/Rank-5/mAP.
 Training writes metrics to:
 
 ```text
-outputs/robust_person_reid/training_metrics.csv
-outputs/robust_person_reid/evaluation_metrics.csv
+outputs/pedestrian_reid/training_metrics.csv
+outputs/pedestrian_reid/evaluation_metrics.csv
 ```
 
 Generate paper figures after training:
@@ -224,5 +224,5 @@ python -m scripts.plot_metrics --dataset market
 Figures are saved under:
 
 ```text
-outputs/robust_person_reid/figures
+outputs/pedestrian_reid/figures
 ```

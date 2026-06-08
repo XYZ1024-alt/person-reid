@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from torch.utils.data import Sampler
 
-from robust_person_reid.data.datasets import MARKET_SOURCE, PRCC_SOURCE, UNKNOWN_CLOTHES, ReidSample
+from pedestrian_reid.data.datasets import MARKET_SOURCE, PRCC_SOURCE, UNKNOWN_CLOTHES, ReidSample
 
 
 MIN_INSTANCES_PER_IDENTITY = 2

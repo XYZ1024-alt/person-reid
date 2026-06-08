@@ -1,2 +1,1 @@
-"""Command-line entrypoints for RobustPersonReID."""
-
+"""Command-line entrypoints for PedestrianReID."""

@@ -25,4 +25,3 @@ def batch_hard_triplet_loss(features: torch.Tensor, labels: torch.Tensor, margin
     positive = distances.masked_fill(~same_identity, -1.0).max(dim=1).values
     negative = distances.masked_fill(~different_identity, float("inf")).min(dim=1).values
     return F.relu(positive - negative + margin)[valid_anchor].mean()
-

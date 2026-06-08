@@ -4,9 +4,10 @@ import argparse
 
 import torch
 
-from robust_person_reid.builders import MODE_MARKET, MODE_PRCC
-from robust_person_reid.engine.evaluator import evaluate_checkpoint
-from robust_person_reid.runtime import configure_torch_runtime
+from pedestrian_reid.builders import MODE_MARKET, MODE_PRCC
+from pedestrian_reid.engine.evaluator import evaluate_checkpoint
+from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
+from pedestrian_reid.runtime import configure_torch_runtime
 
 
 DEFAULT_BATCH_SIZE = 64
@@ -16,12 +17,13 @@ DEFAULT_PRCC_ROOT = "prcc"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a RobustPersonReID checkpoint")
+    parser = argparse.ArgumentParser(description="Evaluate a PedestrianReID checkpoint")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--dataset", choices=[MODE_MARKET, MODE_PRCC], default=MODE_MARKET)
     parser.add_argument("--root", default="")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=REID_FEATURE_KEY)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
     args.root = args.root or default_root(args.dataset)

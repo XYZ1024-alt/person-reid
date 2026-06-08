@@ -1,2 +1,0 @@
-"""Configuration defaults for RobustPersonReID."""
-

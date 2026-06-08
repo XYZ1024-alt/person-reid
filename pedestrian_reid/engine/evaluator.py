@@ -5,11 +5,11 @@ from dataclasses import dataclass
 
 import torch
 
-from robust_person_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, build_eval_loader
-from robust_person_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
-from robust_person_reid.modules.metrics import PROTOCOL_CLOTH_CHANGE, PROTOCOL_STANDARD
-from robust_person_reid.modules.metrics import evaluate_reid, extract_feature_bank
-from robust_person_reid.modules.model import RobustPersonReIDNet
+from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, build_eval_loader
+from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
+from pedestrian_reid.modules.metrics import PROTOCOL_CLOTH_CHANGE, PROTOCOL_STANDARD
+from pedestrian_reid.modules.metrics import evaluate_reid, extract_feature_bank
+from pedestrian_reid.modules.model import PedestrianReIDNet
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ class EvalJob:
 
 def validate_dataset(model, root: str, name: str, protocol: str, device: torch.device, args: Namespace):
     gallery_loader = build_eval_loader(root, name, "gallery", VARIANT_STANDARD, args)
-    gallery_bank = extract_feature_bank(model, gallery_loader, device)
+    gallery_bank = extract_feature_bank(model, gallery_loader, device, args.feature_key)
     return {
         VARIANT_STANDARD: _validate_variant(model, root, name, VARIANT_STANDARD, gallery_bank, protocol, device, args),
         VARIANT_DARK: _validate_variant(model, root, name, VARIANT_DARK, gallery_bank, protocol, device, args),
@@ -66,9 +66,9 @@ def evaluate_checkpoint(args: Namespace) -> None:
     print_metrics(metrics)
 
 
-def load_model(checkpoint_path: str, device: torch.device) -> RobustPersonReIDNet:
+def load_model(checkpoint_path: str, device: torch.device) -> PedestrianReIDNet:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model = RobustPersonReIDNet(
+    model = PedestrianReIDNet(
         int(checkpoint["num_classes"]),
         num_clothes_classes=int(checkpoint["num_clothes_classes"]),
     ).to(device)
@@ -91,5 +91,5 @@ def _run_eval_job(model, job: EvalJob, device: torch.device, args: Namespace):
 
 def _validate_variant(model, root: str, name: str, variant: str, gallery_bank, protocol: str, device, args):
     query_loader = build_eval_loader(root, name, "query", variant, args)
-    query_bank = extract_feature_bank(model, query_loader, device)
+    query_bank = extract_feature_bank(model, query_loader, device, args.feature_key)
     return evaluate_reid(query_bank, gallery_bank, protocol)

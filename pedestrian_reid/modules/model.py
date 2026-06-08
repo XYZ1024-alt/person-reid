@@ -125,7 +125,7 @@ class GradientReverse(torch.autograd.Function):
         return gradients.neg().mul(ctx.scale), None
 
 
-class RobustPersonReIDNet(nn.Module):
+class PedestrianReIDNet(nn.Module):
     def __init__(self, num_classes: int, embedding_dim: int = EMBEDDING_DIM, num_clothes_classes: int = 0):
         super().__init__()
         self.backbone = ResNet50IBNBackbone()

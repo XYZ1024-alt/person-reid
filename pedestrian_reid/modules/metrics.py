@@ -10,6 +10,7 @@ TOP_K = 5
 PROTOCOL_STANDARD = "standard"
 PROTOCOL_CLOTH_CHANGE = "cloth_change"
 REID_FEATURE_KEY = "bn_features"
+FEATURE_KEYS = {"features", "bn_features"}
 
 
 @dataclass(frozen=True)
@@ -22,13 +23,14 @@ class FeatureBank:
     paths: list[str]
 
 
-def extract_feature_bank(model, loader, device: torch.device) -> FeatureBank:
+def extract_feature_bank(model, loader, device: torch.device, feature_key: str = REID_FEATURE_KEY) -> FeatureBank:
+    _validate_feature_key(feature_key)
     model.eval()
     features, pids, camids, clothes_ids, is_junk, paths = [], [], [], [], [], []
     with torch.no_grad():
         for batch in loader:
             outputs = model(batch["image"].to(device))
-            features.append(outputs[REID_FEATURE_KEY].cpu())
+            features.append(outputs[feature_key].cpu())
             pids.append(batch["pid"])
             camids.append(batch["camid"])
             clothes_ids.append(batch["clothes_id"])
@@ -93,3 +95,8 @@ def _metrics(cmc_total: torch.Tensor, aps: list[float], query_count: int) -> dic
     metrics = {f"rank{rank + 1}": (cmc_total[rank] / divisor).item() for rank in range(TOP_K)}
     metrics["mAP"] = float(sum(aps) / len(aps))
     return metrics
+
+
+def _validate_feature_key(feature_key: str) -> None:
+    if feature_key not in FEATURE_KEYS:
+        raise ValueError(f"feature_key must be one of {sorted(FEATURE_KEYS)}, got {feature_key}")

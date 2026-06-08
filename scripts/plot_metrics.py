@@ -11,13 +11,14 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
-from robust_person_reid.builders import MODE_MARKET, MODE_PRCC, build_eval_loader
-from robust_person_reid.data.transforms import VARIANT_STANDARD
-from robust_person_reid.engine.evaluator import extract_feature_bank, load_model
-from robust_person_reid.runtime import configure_torch_runtime
+from pedestrian_reid.builders import MODE_MARKET, MODE_PRCC, build_eval_loader
+from pedestrian_reid.data.transforms import VARIANT_STANDARD
+from pedestrian_reid.engine.evaluator import extract_feature_bank, load_model
+from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
+from pedestrian_reid.runtime import configure_torch_runtime
 
 
-DEFAULT_OUTPUT_DIR = "outputs/robust_person_reid"
+DEFAULT_OUTPUT_DIR = "outputs/pedestrian_reid"
 DEFAULT_MARKET_ROOT = "Market-1501"
 DEFAULT_PRCC_ROOT = "prcc"
 DEFAULT_BATCH_SIZE = 64
@@ -38,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--matrix-size", type=int, default=DEFAULT_MATRIX_SIZE)
     parser.add_argument("--fig-dir", default="")
+    parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=REID_FEATURE_KEY)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
     args.root = args.root or default_root(args.dataset)
@@ -111,7 +113,7 @@ def plot_similarity_matrix(args: argparse.Namespace, fig_dir: Path) -> None:
 
 def _feature_bank(model, root: str, dataset: str, split: str, device: torch.device, args: argparse.Namespace):
     loader = build_eval_loader(root, dataset, split, VARIANT_STANDARD, args)
-    return extract_feature_bank(model, loader, device)
+    return extract_feature_bank(model, loader, device, args.feature_key)
 
 
 def _similarity_matrix(query_features: torch.Tensor, gallery_features: torch.Tensor, size: int) -> torch.Tensor:

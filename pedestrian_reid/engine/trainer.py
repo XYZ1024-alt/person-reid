@@ -14,11 +14,11 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
-from robust_person_reid.builders import build_train_loader, build_training_dataset
-from robust_person_reid.engine.evaluator import evaluate_enabled_datasets, primary_eval_metric
-from robust_person_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
-from robust_person_reid.modules.losses import batch_hard_triplet_loss
-from robust_person_reid.modules.model import RobustPersonReIDNet, load_imagenet_pretrained_backbone
+from pedestrian_reid.builders import build_train_loader, build_training_dataset
+from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, primary_eval_metric
+from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
+from pedestrian_reid.modules.losses import batch_hard_triplet_loss
+from pedestrian_reid.modules.model import PedestrianReIDNet, load_imagenet_pretrained_backbone
 
 
 CHECKPOINT_LAST = "last.pth"
@@ -86,7 +86,7 @@ def train_from_args(args: Namespace) -> None:
         validate_training_dataset(dataset)
         loader = build_train_loader(dataset, args, distributed)
         _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
-        model = RobustPersonReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
+        model = PedestrianReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
         initialize_model_weights(model, args, distributed)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         scaler = _build_grad_scaler(args, device)
@@ -103,7 +103,7 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def initialize_model_weights(model: RobustPersonReIDNet, args: Namespace, distributed: DistributedContext) -> None:
+def initialize_model_weights(model: PedestrianReIDNet, args: Namespace, distributed: DistributedContext) -> None:
     if args.resume:
         return
     if args.pretrained_checkpoint:
@@ -112,7 +112,7 @@ def initialize_model_weights(model: RobustPersonReIDNet, args: Namespace, distri
     load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
 
 
-def load_compatible_pretrained_checkpoint(model: RobustPersonReIDNet, path: str, distributed: DistributedContext) -> None:
+def load_compatible_pretrained_checkpoint(model: PedestrianReIDNet, path: str, distributed: DistributedContext) -> None:
     checkpoint = torch.load(path, map_location="cpu")
     source = checkpoint["model"]
     target = model.state_dict()
@@ -697,6 +697,7 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"precision={args.precision}",
         f"best_metric={args.best_metric}",
         f"best_variant={args.best_variant}",
+        f"feature_key={args.feature_key}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",

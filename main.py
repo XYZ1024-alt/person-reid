@@ -7,7 +7,7 @@ from modules.detector import get_person_crops
 from modules.reid_engine import compute_similarity, extract_feature
 
 
-REID_CHECKPOINT_PATH = "outputs/robust_person_reid/best.pth"
+REID_CHECKPOINT_PATH = "outputs/pedestrian_reid/best.pth"
 TARGET_IMG_PATH = "data/target.jpg"
 VIDEO_PATH = "data/video.mp4"
 

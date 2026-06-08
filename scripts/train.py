@@ -4,10 +4,11 @@ import argparse
 
 import torch
 
-from robust_person_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
-from robust_person_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
-from robust_person_reid.engine.trainer import train_from_args
-from robust_person_reid.runtime import configure_torch_runtime
+from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
+from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
+from pedestrian_reid.engine.trainer import train_from_args
+from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
+from pedestrian_reid.runtime import configure_torch_runtime
 
 
 DEFAULT_EPOCHS = 60
@@ -37,6 +38,7 @@ DEFAULT_DISTRIBUTED = False
 DEFAULT_DDP_FIND_UNUSED_PARAMETERS = "auto"
 DEFAULT_BEST_METRIC = "rank1"
 DEFAULT_BEST_VARIANT = VARIANT_STANDARD
+DEFAULT_FEATURE_KEY = REID_FEATURE_KEY
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
 DEFAULT_FLIP_PROBABILITY = 0.5
@@ -53,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=[MODE_MARKET, MODE_PRCC, MODE_JOINT], default=MODE_JOINT)
     parser.add_argument("--market-root", default=DEFAULT_MARKET_ROOT)
     parser.add_argument("--prcc-root", default=DEFAULT_PRCC_ROOT)
-    parser.add_argument("--output-dir", default="outputs/robust_person_reid")
+    parser.add_argument("--output-dir", default="outputs/pedestrian_reid")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--instances", type=int, default=DEFAULT_INSTANCES)
@@ -81,6 +83,7 @@ def parse_args() -> argparse.Namespace:
     add_augmentation_args(parser)
     parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
     parser.add_argument("--best-variant", choices=[VARIANT_STANDARD, VARIANT_DARK, VARIANT_OCCLUDED], default=DEFAULT_BEST_VARIANT)
+    parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_FEATURE_KEY)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
     parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)

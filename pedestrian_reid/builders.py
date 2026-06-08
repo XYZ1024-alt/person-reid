@@ -5,20 +5,20 @@ from pathlib import Path
 
 from torch.utils.data import DataLoader
 
-from robust_person_reid.data.datasets import (
+from pedestrian_reid.data.datasets import (
     ReIDDataset,
     ReidSample,
     load_market_samples,
     load_prcc_samples,
     relabel_samples,
 )
-from robust_person_reid.data.samplers import (
+from pedestrian_reid.data.samplers import (
     ClothesAwareIdentityBatchSampler,
     IdentityBatchSampler,
     SourceBalancedIdentityBatchSampler,
     SourceBalancedSamplerConfig,
 )
-from robust_person_reid.data.transforms import ReIDTransform, TransformConfig
+from pedestrian_reid.data.transforms import ReIDTransform, TransformConfig
 
 
 MODE_MARKET = "market"
