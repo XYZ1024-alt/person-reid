@@ -8,7 +8,12 @@ from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.engine.trainer import train_from_args
 from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
-from pedestrian_reid.modules.model import DEFAULT_NUM_PARTS, PART_EMBEDDING_DIM
+from pedestrian_reid.modules.model import (
+    DEFAULT_COMBINED_GLOBAL_WEIGHT,
+    DEFAULT_COMBINED_PART_WEIGHT,
+    DEFAULT_NUM_PARTS,
+    PART_EMBEDDING_DIM,
+)
 from pedestrian_reid.runtime import configure_torch_runtime
 
 
@@ -47,6 +52,10 @@ DEFAULT_PARTS = DEFAULT_NUM_PARTS
 DEFAULT_PART_EMBEDDING_DIM = PART_EMBEDDING_DIM
 DEFAULT_PART_TRIPLET_WEIGHT = 0.0
 DEFAULT_CLOTH_INVARIANT_WEIGHT = 0.0
+DEFAULT_COMBINED_GLOBAL = DEFAULT_COMBINED_GLOBAL_WEIGHT
+DEFAULT_COMBINED_PART = DEFAULT_COMBINED_PART_WEIGHT
+DEFAULT_DISTILL_WEIGHT = 0.0
+DEFAULT_FREEZE_BACKBONE_ALL_EPOCHS = False
 DEFAULT_LR_MILESTONES = "40,70,100"
 DEFAULT_LR_GAMMA = 0.1
 DEFAULT_FLIP_PROBABILITY = 0.5
@@ -99,6 +108,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--part-embedding-dim", type=int, default=DEFAULT_PART_EMBEDDING_DIM)
     parser.add_argument("--part-triplet-weight", type=float, default=DEFAULT_PART_TRIPLET_WEIGHT)
     parser.add_argument("--cloth-invariant-weight", type=float, default=DEFAULT_CLOTH_INVARIANT_WEIGHT)
+    parser.add_argument("--combined-global-weight", type=float, default=DEFAULT_COMBINED_GLOBAL)
+    parser.add_argument("--combined-part-weight", type=float, default=DEFAULT_COMBINED_PART)
+    parser.add_argument("--teacher-checkpoint", default="")
+    parser.add_argument("--distill-weight", type=float, default=DEFAULT_DISTILL_WEIGHT)
+    parser.add_argument("--freeze-backbone-all-epochs", action="store_true", default=DEFAULT_FREEZE_BACKBONE_ALL_EPOCHS)
     parser.add_argument("--lr-milestones", default=DEFAULT_LR_MILESTONES)
     parser.add_argument("--lr-gamma", type=float, default=DEFAULT_LR_GAMMA)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)

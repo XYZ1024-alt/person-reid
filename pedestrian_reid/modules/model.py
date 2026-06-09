@@ -13,6 +13,8 @@ BOTTLENECK_EXPANSION = 4
 EMBEDDING_DIM = 256
 PART_EMBEDDING_DIM = 256
 DEFAULT_NUM_PARTS = 6
+DEFAULT_COMBINED_GLOBAL_WEIGHT = 0.7
+DEFAULT_COMBINED_PART_WEIGHT = 0.3
 REID_FEATURE_DIM = 2048
 CONV1_KERNEL = 7
 CONV3_KERNEL = 3
@@ -161,12 +163,17 @@ class PedestrianReIDNet(nn.Module):
         use_part_branch: bool = False,
         num_parts: int = DEFAULT_NUM_PARTS,
         part_embedding_dim: int = PART_EMBEDDING_DIM,
+        combined_global_weight: float = DEFAULT_COMBINED_GLOBAL_WEIGHT,
+        combined_part_weight: float = DEFAULT_COMBINED_PART_WEIGHT,
     ):
         super().__init__()
+        _validate_combined_weights(combined_global_weight, combined_part_weight)
         self.embedding_dim = embedding_dim
         self.use_part_branch = use_part_branch
         self.num_parts = num_parts
         self.part_embedding_dim = part_embedding_dim
+        self.combined_global_weight = combined_global_weight
+        self.combined_part_weight = combined_part_weight
         self.backbone = ResNet50IBNBackbone()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.embedding = nn.Linear(REID_FEATURE_DIM, embedding_dim, bias=False)
@@ -188,7 +195,12 @@ class PedestrianReIDNet(nn.Module):
         if self.part_branch is not None:
             part_features = self.part_branch(feature_map)
             outputs["part_features"] = part_features
-            outputs["combined_features"] = _combined_features(outputs["bn_features"], part_features)
+            outputs["combined_features"] = _combined_features(
+                outputs["bn_features"],
+                part_features,
+                global_weight=self.combined_global_weight,
+                part_weight=self.combined_part_weight,
+            )
         if self.clothes_classifier is not None:
             reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
             outputs["clothes_logits"] = self.clothes_classifier(reversed_features)
@@ -222,9 +234,24 @@ def _part_branch(use_part_branch: bool, num_parts: int, embedding_dim: int) -> P
     return PartFeatureBranch(num_parts, embedding_dim)
 
 
-def _combined_features(global_features: torch.Tensor, part_features: torch.Tensor) -> torch.Tensor:
-    flattened_parts = part_features.flatten(1)
-    return F.normalize(torch.cat((global_features, flattened_parts), dim=1), dim=1)
+def _combined_features(
+    global_features: torch.Tensor,
+    part_features: torch.Tensor,
+    *,
+    global_weight: float,
+    part_weight: float,
+) -> torch.Tensor:
+    pooled_parts = F.normalize(part_features.mean(dim=1), dim=1)
+    weighted_global = global_features * global_weight
+    weighted_parts = pooled_parts * part_weight
+    return F.normalize(torch.cat((weighted_global, weighted_parts), dim=1), dim=1)
+
+
+def _validate_combined_weights(global_weight: float, part_weight: float) -> None:
+    if global_weight < 0.0 or part_weight < 0.0:
+        raise ValueError("combined feature weights must be >= 0")
+    if global_weight == 0.0 and part_weight == 0.0:
+        raise ValueError("at least one combined feature weight must be > 0")
 
 
 def load_imagenet_pretrained_backbone(backbone: ResNet50IBNBackbone, *, verbose: bool = True) -> int:

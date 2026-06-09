@@ -9,7 +9,14 @@ from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, build_e
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.metrics import PROTOCOL_CLOTH_CHANGE, PROTOCOL_STANDARD
 from pedestrian_reid.modules.metrics import evaluate_reid, extract_feature_bank
-from pedestrian_reid.modules.model import DEFAULT_NUM_PARTS, EMBEDDING_DIM, PART_EMBEDDING_DIM, PedestrianReIDNet
+from pedestrian_reid.modules.model import (
+    DEFAULT_COMBINED_GLOBAL_WEIGHT,
+    DEFAULT_COMBINED_PART_WEIGHT,
+    DEFAULT_NUM_PARTS,
+    EMBEDDING_DIM,
+    PART_EMBEDDING_DIM,
+    PedestrianReIDNet,
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,8 @@ def load_model(checkpoint_path: str, device: torch.device) -> PedestrianReIDNet:
         use_part_branch=bool(model_config.get("use_part_branch", False)),
         num_parts=int(model_config.get("num_parts", DEFAULT_NUM_PARTS)),
         part_embedding_dim=int(model_config.get("part_embedding_dim", PART_EMBEDDING_DIM)),
+        combined_global_weight=float(model_config.get("combined_global_weight", DEFAULT_COMBINED_GLOBAL_WEIGHT)),
+        combined_part_weight=float(model_config.get("combined_part_weight", DEFAULT_COMBINED_PART_WEIGHT)),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

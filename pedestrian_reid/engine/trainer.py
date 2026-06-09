@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from pedestrian_reid.builders import MODE_MARKET, build_train_loader, build_training_dataset
 from pedestrian_reid.data.datasets import PRCC_SOURCE, UNKNOWN_CLOTHES
-from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, primary_eval_metric
+from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, load_model, primary_eval_metric
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.losses import batch_hard_triplet_loss
 from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY
@@ -37,11 +37,13 @@ TRAIN_METRIC_FIELDS = [
     "cal",
     "sketch",
     "consistency",
+    "distill",
     "part_triplet",
     "cloth_invariant",
     "valid_cross_clothes_pairs",
     "effective_cal_weight",
     "effective_sketch_consistency_weight",
+    "effective_distill_weight",
 ]
 EVAL_METRIC_FIELDS = ["rank1", "rank2", "rank3", "rank4", "rank5", "mAP"]
 BEST_METRIC_RANK1 = "rank1"
@@ -61,12 +63,14 @@ ENV_RANK = "RANK"
 ENV_WORLD_SIZE = "WORLD_SIZE"
 ENV_LOCAL_RANK = "LOCAL_RANK"
 FREEZABLE_BACKBONE_LAYERS = {"stem", "layer1", "layer2", "layer3", "layer4"}
+BACKBONE_LAYER_ORDER = ("stem", "layer1", "layer2", "layer3", "layer4")
 PRETRAIN_SKIP_PREVIEW_LIMIT = 10
 MIN_IMAGENET_PRETRAINED_TENSORS = 300
 PRCC_EXPECTED_CLOTHES_PER_IDENTITY = 2
 MIN_PARTS = 1
 NO_PART_LOSS = 0.0
 NO_CLOTH_INVARIANT_LOSS = 0.0
+NO_DISTILL_LOSS = 0.0
 UPPER_TRIANGLE_DIAGONAL = 1
 AUGMENT_PROBABILITY_ARGS = (
     "flip_probability",
@@ -105,6 +109,7 @@ class CheckpointTarget:
 @dataclass(frozen=True, kw_only=True)
 class TrainingRun:
     model: torch.nn.Module
+    teacher: torch.nn.Module | None
     loader: object
     optimizer: torch.optim.Optimizer
     scheduler: object
@@ -131,9 +136,11 @@ class LossComponents:
     cal: torch.Tensor
     sketch: torch.Tensor
     consistency: torch.Tensor
+    distill: torch.Tensor
     auxiliary: AuxiliaryLosses
     effective_cal_weight: float
     consistency_weight: float
+    distill_weight: float
 
 
 def train_from_args(args: Namespace) -> None:
@@ -147,6 +154,7 @@ def train_from_args(args: Namespace) -> None:
         loader = build_train_loader(dataset, args, distributed)
         _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
         model = build_model(dataset, args).to(device)
+        teacher = initialize_teacher(args, device)
         pretrained_count = initialize_model_weights(model, args, distributed)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         scheduler = build_lr_scheduler(optimizer, args)
@@ -156,6 +164,7 @@ def train_from_args(args: Namespace) -> None:
         run_training(
             TrainingRun(
                 model=model,
+                teacher=teacher,
                 loader=loader,
                 optimizer=optimizer,
                 scheduler=scheduler,
@@ -195,7 +204,19 @@ def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
         use_part_branch=args.use_part_branch,
         num_parts=args.num_parts,
         part_embedding_dim=args.part_embedding_dim,
+        combined_global_weight=args.combined_global_weight,
+        combined_part_weight=args.combined_part_weight,
     )
+
+
+def initialize_teacher(args: Namespace, device: torch.device) -> torch.nn.Module | None:
+    if args.distill_weight <= NO_DISTILL_LOSS:
+        return None
+    teacher = load_model(args.teacher_checkpoint, device)
+    for parameter in teacher.parameters():
+        parameter.requires_grad = False
+    teacher.eval()
+    return teacher
 
 
 def load_compatible_pretrained_checkpoint(model: PedestrianReIDNet, path: str, distributed: DistributedContext) -> int:
@@ -360,7 +381,7 @@ def ddp_find_unused_parameters(args: Namespace) -> bool:
 
 
 def _needs_ddp_unused_parameter_detection(args: Namespace) -> bool:
-    return _cal_has_inactive_epochs(args) or _sketch_path_is_conditional(args)
+    return _cal_has_inactive_epochs(args) or _sketch_path_is_conditional(args) or _backbone_freeze_is_active(args)
 
 
 def _cal_has_inactive_epochs(args: Namespace) -> bool:
@@ -373,11 +394,15 @@ def _sketch_path_is_conditional(args: Namespace) -> bool:
     return args.sketch_loss_weight > NO_SKETCH_LOSS or args.rgb_sketch_consistency_weight > NO_SKETCH_LOSS
 
 
-def configure_backbone_freeze(model, args: Namespace, epoch: int, distributed: DistributedContext) -> None:
-    layers = _freeze_backbone_layers(args)
+def _backbone_freeze_is_active(args: Namespace) -> bool:
+    return args.freeze_backbone_all_epochs or args.freeze_backbone_epochs > 0
+
+
+def configure_backbone_freeze(model, args: Namespace, epoch: int, *, distributed: DistributedContext) -> None:
+    layers = _active_freeze_layers(args)
     if not layers:
         return
-    freeze = epoch < args.freeze_backbone_epochs
+    freeze = args.freeze_backbone_all_epochs or epoch < args.freeze_backbone_epochs
     base_model = _unwrap_model(model)
     changed = _set_backbone_layers_trainable(base_model, layers, not freeze)
     _set_frozen_backbone_layers_eval(base_model, layers, freeze)
@@ -406,9 +431,17 @@ def _freeze_backbone_layers(args: Namespace) -> list[str]:
     return [name.strip() for name in args.freeze_backbone_layers.split(",") if name.strip()]
 
 
+def _active_freeze_layers(args: Namespace) -> list[str]:
+    if args.freeze_backbone_all_epochs:
+        return list(BACKBONE_LAYER_ORDER)
+    return _freeze_backbone_layers(args)
+
+
 def train_one_epoch(
     model,
     loader,
+    *,
+    teacher,
     optimizer,
     scaler,
     device: torch.device,
@@ -417,18 +450,36 @@ def train_one_epoch(
     distributed: DistributedContext,
 ) -> dict[str, float]:
     model.train()
-    configure_backbone_freeze(model, args, epoch, distributed)
+    configure_backbone_freeze(model, args, epoch, distributed=distributed)
     totals = _empty_epoch_totals()
     effective_cal_weight = _effective_cal_weight(args, epoch)
     effective_consistency_weight = _effective_sketch_consistency_weight(args, epoch)
     progress = tqdm(loader, desc="batches", unit="batch", disable=not distributed.is_main)
     for batch in progress:
-        losses = _train_batch(model, batch, optimizer, scaler, device, args, effective_cal_weight, effective_consistency_weight)
+        losses = _train_batch(
+            model,
+            batch,
+            teacher=teacher,
+            optimizer=optimizer,
+            scaler=scaler,
+            device=device,
+            args=args,
+            effective_cal_weight=effective_cal_weight,
+            effective_consistency_weight=effective_consistency_weight,
+        )
         _accumulate(totals, losses)
-        progress.set_postfix(_batch_metrics(losses, effective_cal_weight, effective_consistency_weight))
+        progress.set_postfix(
+            _batch_metrics(
+                losses,
+                cal_weight=effective_cal_weight,
+                consistency_weight=effective_consistency_weight,
+                distill_weight=args.distill_weight,
+            )
+        )
     metrics = {key: value / len(loader) for key, value in totals.items()}
     metrics["effective_cal_weight"] = effective_cal_weight
     metrics["effective_sketch_consistency_weight"] = effective_consistency_weight
+    metrics["effective_distill_weight"] = args.distill_weight
     return metrics
 
 
@@ -502,10 +553,12 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
         raise ValueError(f"num_parts must be >= {MIN_PARTS}")
     if args.part_embedding_dim <= 0:
         raise ValueError("part_embedding_dim must be > 0")
+    _validate_combined_weight_args(args)
     if args.part_triplet_weight > NO_PART_LOSS and not args.use_part_branch:
         raise ValueError("part_triplet_weight requires --use-part-branch")
     if args.cloth_invariant_weight > NO_CLOTH_INVARIANT_LOSS and args.mode == MODE_MARKET:
         raise ValueError("cloth_invariant_weight requires PRCC or joint mode")
+    _validate_distill_args(args)
     if args.feature_key == COMBINED_FEATURE_KEY and not args.use_part_branch:
         raise ValueError("combined_features requires --use-part-branch")
     if args.sketch_warmup_epochs < 0:
@@ -528,6 +581,20 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
     _validate_freeze_args(args)
     _validate_probability_args(args)
     _validate_parallel_args(args, distributed)
+
+
+def _validate_combined_weight_args(args: Namespace) -> None:
+    if args.combined_global_weight < 0.0 or args.combined_part_weight < 0.0:
+        raise ValueError("combined feature weights must be >= 0")
+    if args.combined_global_weight == 0.0 and args.combined_part_weight == 0.0:
+        raise ValueError("at least one combined feature weight must be > 0")
+
+
+def _validate_distill_args(args: Namespace) -> None:
+    if args.distill_weight < 0:
+        raise ValueError("distill_weight must be >= 0")
+    if args.distill_weight > NO_DISTILL_LOSS and not args.teacher_checkpoint:
+        raise ValueError("distill_weight requires --teacher-checkpoint")
 
 
 def _validate_probability_args(args: Namespace) -> None:
@@ -584,7 +651,17 @@ def run_training(run: TrainingRun) -> None:
         print(_training_header(run.args, run.loader, run.distributed))
     for epoch in range(start_epoch, run.args.epochs):
         rank_zero_print(run.distributed, f"epoch={epoch + 1}/{run.args.epochs}")
-        metrics = train_one_epoch(run.model, run.loader, run.optimizer, run.scaler, run.device, run.args, epoch, run.distributed)
+        metrics = train_one_epoch(
+            run.model,
+            run.loader,
+            teacher=run.teacher,
+            optimizer=run.optimizer,
+            scaler=run.scaler,
+            device=run.device,
+            args=run.args,
+            epoch=epoch,
+            distributed=run.distributed,
+        )
         if run.distributed.is_main:
             _print_epoch(epoch, metrics)
             _write_train_metrics(output_dir, epoch, metrics)
@@ -606,6 +683,8 @@ def run_training(run: TrainingRun) -> None:
 def _train_batch(
     model,
     batch,
+    *,
+    teacher,
     optimizer,
     scaler,
     device: torch.device,
@@ -627,6 +706,7 @@ def _train_batch(
     triplet = batch_hard_triplet_loss(outputs["features"].float(), labels, args.triplet_margin)
     cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
     sketch_loss, consistency_loss = _sketch_losses(sketch_context, outputs, sketch_outputs, device, args, effective_consistency_weight)
+    distill_loss = _distill_loss(outputs, teacher=teacher, images=images, device=device, args=args)
     auxiliary = _auxiliary_losses(outputs, labels, clothes_labels, batch["source"], args, device)
     components = LossComponents(
         ce=ce_loss,
@@ -634,25 +714,32 @@ def _train_batch(
         cal=cal_loss,
         sketch=sketch_loss,
         consistency=consistency_loss,
+        distill=distill_loss,
         auxiliary=auxiliary,
         effective_cal_weight=effective_cal_weight,
         consistency_weight=effective_consistency_weight,
+        distill_weight=args.distill_weight,
     )
     loss = _total_loss(args, components)
     optimizer.zero_grad()
     scaler.scale(loss).backward()
     scaler.step(optimizer)
     scaler.update()
+    return _batch_loss_metrics(loss, components)
+
+
+def _batch_loss_metrics(loss: torch.Tensor, components: LossComponents) -> dict[str, torch.Tensor]:
     return {
         "loss": loss,
-        "ce": ce_loss,
-        "triplet": triplet,
-        "cal": cal_loss,
-        "sketch": sketch_loss,
-        "consistency": consistency_loss,
-        "part_triplet": auxiliary.part_triplet,
-        "cloth_invariant": auxiliary.cloth_invariant,
-        "valid_cross_clothes_pairs": auxiliary.valid_cross_clothes_pairs,
+        "ce": components.ce,
+        "triplet": components.triplet,
+        "cal": components.cal,
+        "sketch": components.sketch,
+        "consistency": components.consistency,
+        "distill": components.distill,
+        "part_triplet": components.auxiliary.part_triplet,
+        "cloth_invariant": components.auxiliary.cloth_invariant,
+        "valid_cross_clothes_pairs": components.auxiliary.valid_cross_clothes_pairs,
     }
 
 
@@ -757,6 +844,24 @@ def _optional_triplet(features: torch.Tensor, labels: torch.Tensor, margin: floa
     return batch_hard_triplet_loss(features, labels, margin)
 
 
+def _distill_loss(
+    outputs,
+    *,
+    teacher,
+    images: torch.Tensor,
+    device: torch.device,
+    args: Namespace,
+) -> torch.Tensor:
+    if teacher is None or args.distill_weight <= NO_DISTILL_LOSS:
+        return _zero_loss(device)
+    with torch.no_grad():
+        with _autocast_context(args, device):
+            teacher_outputs = teacher(images)
+    student_features = outputs["bn_features"].float()
+    teacher_features = teacher_outputs["bn_features"].detach().float()
+    return 1.0 - F.cosine_similarity(student_features, teacher_features, dim=1).mean()
+
+
 def _auxiliary_losses(outputs, labels: torch.Tensor, clothes_labels: torch.Tensor, sources, args, device) -> AuxiliaryLosses:
     part_triplet = _part_triplet_loss(outputs, labels, args, device)
     cloth_invariant, pair_count = _cloth_invariant_loss(outputs, labels, clothes_labels, sources, args, device)
@@ -822,6 +927,7 @@ def _total_loss(args, components: LossComponents):
     loss = loss + components.effective_cal_weight * components.cal
     loss = loss + args.sketch_loss_weight * components.sketch
     loss = loss + components.consistency_weight * components.consistency
+    loss = loss + components.distill_weight * components.distill
     loss = loss + args.part_triplet_weight * components.auxiliary.part_triplet
     return loss + args.cloth_invariant_weight * components.auxiliary.cloth_invariant
 
@@ -866,6 +972,7 @@ def _empty_epoch_totals() -> dict[str, float]:
         "cal": 0.0,
         "sketch": 0.0,
         "consistency": 0.0,
+        "distill": 0.0,
         "part_triplet": 0.0,
         "cloth_invariant": 0.0,
         "valid_cross_clothes_pairs": 0.0,
@@ -1024,7 +1131,13 @@ def _rewrite_metric_file(path: Path, rows: list[dict[str, str]], fieldnames: lis
             writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
-def _batch_metrics(losses: dict[str, torch.Tensor], cal_weight: float, consistency_weight: float) -> dict[str, str]:
+def _batch_metrics(
+    losses: dict[str, torch.Tensor],
+    *,
+    cal_weight: float,
+    consistency_weight: float,
+    distill_weight: float,
+) -> dict[str, str]:
     return {
         "loss": f"{losses['loss'].item():.4f}",
         "ce": f"{losses['ce'].item():.4f}",
@@ -1032,11 +1145,13 @@ def _batch_metrics(losses: dict[str, torch.Tensor], cal_weight: float, consisten
         "cal": f"{losses['cal'].item():.4f}",
         "sk": f"{losses['sketch'].item():.4f}",
         "con": f"{losses['consistency'].item():.4f}",
+        "dis": f"{losses['distill'].item():.4f}",
         "part": f"{losses['part_triplet'].item():.4f}",
         "cloth": f"{losses['cloth_invariant'].item():.4f}",
         "pairs": f"{losses['valid_cross_clothes_pairs'].item():.0f}",
         "cal_w": f"{cal_weight:.4f}",
         "con_w": f"{consistency_weight:.4f}",
+        "dis_w": f"{distill_weight:.4f}",
     }
 
 
@@ -1060,12 +1175,14 @@ def _checkpoint_metadata(epoch: int, metric_name: str, metric_value: float, data
     }
 
 
-def _model_config(model) -> dict[str, int | bool]:
+def _model_config(model) -> dict[str, int | float | bool]:
     return {
         "embedding_dim": int(model.embedding_dim),
         "use_part_branch": bool(model.use_part_branch),
         "num_parts": int(model.num_parts),
         "part_embedding_dim": int(model.part_embedding_dim),
+        "combined_global_weight": float(model.combined_global_weight),
+        "combined_part_weight": float(model.combined_part_weight),
     }
 
 
@@ -1074,10 +1191,12 @@ def _print_epoch(epoch: int, metrics: dict[str, float]) -> None:
         f"epoch={epoch + 1} loss={metrics['loss']:.4f} ce={metrics['ce']:.4f} "
         f"triplet={metrics['triplet']:.4f} cal={metrics['cal']:.4f} "
         f"sketch={metrics['sketch']:.4f} consistency={metrics['consistency']:.4f} "
+        f"distill={metrics['distill']:.4f} "
         f"part={metrics['part_triplet']:.4f} cloth={metrics['cloth_invariant']:.4f} "
         f"pairs={metrics['valid_cross_clothes_pairs']:.1f} "
         f"cal_w={metrics['effective_cal_weight']:.4f} "
-        f"con_w={metrics['effective_sketch_consistency_weight']:.4f}"
+        f"con_w={metrics['effective_sketch_consistency_weight']:.4f} "
+        f"distill_w={metrics['effective_distill_weight']:.4f}"
     )
 
 
@@ -1121,9 +1240,14 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"num_parts={args.num_parts}",
         f"part_triplet_weight={args.part_triplet_weight}",
         f"cloth_invariant_weight={args.cloth_invariant_weight}",
+        f"combined_global_weight={args.combined_global_weight}",
+        f"combined_part_weight={args.combined_part_weight}",
+        f"teacher_checkpoint={args.teacher_checkpoint}",
+        f"distill_weight={args.distill_weight}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",
+        f"freeze_backbone_all_epochs={args.freeze_backbone_all_epochs}",
         f"pin_memory={args.pin_memory}",
         f"persistent_workers={_loader_has_persistent_workers(loader)}",
     ]
