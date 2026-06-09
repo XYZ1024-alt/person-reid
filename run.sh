@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GPUS="${GPUS:-2}"
+GPUS="${GPUS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
 START_STAGE="${START_STAGE:-1}"
-STOP_STAGE="${STOP_STAGE:-4}"
+STOP_STAGE="${STOP_STAGE:-5}"
+RUN_EXPT4_NOCAL="${RUN_EXPT4_NOCAL:-0}"
 TORCHRUN="${TORCHRUN:-torchrun}"
 PYTHON="${PYTHON:-python}"
 
@@ -19,6 +20,7 @@ EXP1="${EXP_ROOT}/expT1_market_clean"
 EXP2="${EXP_ROOT}/expT2_market_dark"
 EXP3="${EXP_ROOT}/expT3_market_occlusion"
 EXP4="${EXP_ROOT}/expT4_market_to_joint_prcc"
+EXP4_NOCAL="${EXP_ROOT}/expT4_market_to_joint_prcc_nocal"
 EXP5="${EXP_ROOT}/expT5_prcc_finetune"
 
 run_stage() {
@@ -38,19 +40,62 @@ run_stage() {
 
 evaluate_market() {
   local checkpoint="$1"
-  "$PYTHON" -m scripts.evaluate --checkpoint "$checkpoint" --dataset market
+  local feature_key="${2:-bn_features}"
+  "$PYTHON" -m scripts.evaluate --checkpoint "$checkpoint" --dataset market --feature-key "$feature_key"
 }
 
 evaluate_prcc() {
   local checkpoint="$1"
-  "$PYTHON" -m scripts.evaluate --checkpoint "$checkpoint" --dataset prcc
+  local feature_key="${2:-bn_features}"
+  "$PYTHON" -m scripts.evaluate --checkpoint "$checkpoint" --dataset prcc --feature-key "$feature_key"
 }
 
-train_distributed() {
-  "$TORCHRUN" --nproc_per_node="$GPUS" -m scripts.train --distributed "$@"
+train_model() {
+  if (( GPUS > 1 )); then
+    "$TORCHRUN" --nproc_per_node="$GPUS" -m scripts.train --distributed "$@"
+    return
+  fi
+  "$PYTHON" -m scripts.train "$@"
 }
 
-run_stage 1 train_distributed \
+train_expt4() {
+  local output_dir="$1"
+  local cal_weight="$2"
+  train_model \
+    --mode joint \
+    --epochs 40 \
+    --batch-size "$BATCH_SIZE" \
+    --num-workers "$NUM_WORKERS" \
+    --lr 0.00005 \
+    --cal-weight "$cal_weight" \
+    --cal-warmup-epochs 25 \
+    --cal-ramp-epochs 15 \
+    --sketch-loss-weight 0 \
+    --rgb-sketch-consistency-weight 0.02 \
+    --sketch-warmup-epochs 10 \
+    --sketch-ramp-epochs 10 \
+    --prcc-identities-ratio 0.75 \
+    --use-part-branch \
+    --num-parts 6 \
+    --part-embedding-dim 256 \
+    --part-triplet-weight 0.5 \
+    --cloth-invariant-weight 0.2 \
+    --feature-key combined_features \
+    --best-metric mAP \
+    --best-variant standard \
+    --eval-period 5 \
+    --lr-milestones 25,35 \
+    --freeze-backbone-epochs 10 \
+    --freeze-backbone-layers stem,layer1,layer2 \
+    --color-jitter-probability 0.5 \
+    --random-grayscale-probability 0.2 \
+    --dark-augment-probability 0.05 \
+    --occlusion-augment-probability 0.1 \
+    --pretrained-checkpoint "$EXP3/best.pth" \
+    --output-dir "$output_dir"
+}
+
+run_stage 1 train_model \
   --mode market \
   --epochs 120 \
   --batch-size "$BATCH_SIZE" \
@@ -68,7 +113,7 @@ run_stage 1 train_distributed \
   --output-dir "$EXP1"
 run_stage 1 evaluate_market "$EXP1/best.pth"
 
-run_stage 2 train_distributed \
+run_stage 2 train_model \
   --mode market \
   --epochs 30 \
   --batch-size "$BATCH_SIZE" \
@@ -88,7 +133,7 @@ run_stage 2 train_distributed \
   --output-dir "$EXP2"
 run_stage 2 evaluate_market "$EXP2/best.pth"
 
-run_stage 3 train_distributed \
+run_stage 3 train_model \
   --mode market \
   --epochs 30 \
   --batch-size "$BATCH_SIZE" \
@@ -108,56 +153,43 @@ run_stage 3 train_distributed \
   --output-dir "$EXP3"
 run_stage 3 evaluate_market "$EXP3/best.pth"
 
-run_stage 4 train_distributed \
-  --mode joint \
-  --epochs 30 \
-  --batch-size "$BATCH_SIZE" \
-  --num-workers "$NUM_WORKERS" \
-  --lr 0.0001 \
-  --cal-weight 0.01 \
-  --cal-warmup-epochs 20 \
-  --cal-ramp-epochs 20 \
-  --sketch-loss-weight 0 \
-  --rgb-sketch-consistency-weight 0.02 \
-  --sketch-warmup-epochs 10 \
-  --sketch-ramp-epochs 10 \
-  --prcc-identities-ratio 0.5 \
-  --best-metric mAP \
-  --best-variant standard \
-  --eval-period 10 \
-  --lr-milestones 30 \
-  --freeze-backbone-epochs 10 \
-  --freeze-backbone-layers stem,layer1,layer2 \
-  --color-jitter-probability 0.5 \
-  --random-grayscale-probability 0.2 \
-  --dark-augment-probability 0.05 \
-  --occlusion-augment-probability 0.1 \
-  --pretrained-checkpoint "$EXP3/best.pth" \
-  --output-dir "$EXP4"
-run_stage 4 evaluate_market "$EXP4/best.pth"
-run_stage 4 evaluate_prcc "$EXP4/best.pth"
+run_stage 4 train_expt4 "$EXP4" 0.003
+run_stage 4 evaluate_market "$EXP4/best.pth" combined_features
+run_stage 4 evaluate_prcc "$EXP4/best.pth" combined_features
 
-run_stage 5 train_distributed \
+if [[ "$RUN_EXPT4_NOCAL" == "1" ]]; then
+  run_stage 4 train_expt4 "$EXP4_NOCAL" 0
+  run_stage 4 evaluate_market "$EXP4_NOCAL/best.pth" combined_features
+  run_stage 4 evaluate_prcc "$EXP4_NOCAL/best.pth" combined_features
+fi
+
+run_stage 5 train_model \
   --mode prcc \
-  --epochs 30 \
+  --epochs 20 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
-  --lr 0.0001 \
-  --cal-weight 0.03 \
-  --cal-warmup-epochs 10 \
+  --lr 0.00003 \
+  --cal-weight 0.003 \
+  --cal-warmup-epochs 5 \
   --cal-ramp-epochs 10 \
   --sketch-loss-weight 0 \
-  --rgb-sketch-consistency-weight 0.02 \
+  --rgb-sketch-consistency-weight 0.01 \
   --sketch-warmup-epochs 5 \
   --sketch-ramp-epochs 10 \
+  --use-part-branch \
+  --num-parts 6 \
+  --part-embedding-dim 256 \
+  --part-triplet-weight 0.5 \
+  --cloth-invariant-weight 0.2 \
+  --feature-key combined_features \
   --best-metric mAP \
   --best-variant standard \
-  --eval-period 10 \
-  --lr-milestones 10,20 \
+  --eval-period 5 \
+  --lr-milestones 10,15 \
   --color-jitter-probability 0.5 \
   --random-grayscale-probability 0.25 \
   --dark-augment-probability 0.05 \
   --occlusion-augment-probability 0.1 \
   --pretrained-checkpoint "$EXP4/best.pth" \
   --output-dir "$EXP5"
-run_stage 5 evaluate_prcc "$EXP5/best.pth"
+run_stage 5 evaluate_prcc "$EXP5/best.pth" combined_features

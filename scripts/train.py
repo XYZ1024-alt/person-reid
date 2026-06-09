@@ -8,6 +8,7 @@ from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.engine.trainer import train_from_args
 from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
+from pedestrian_reid.modules.model import DEFAULT_NUM_PARTS, PART_EMBEDDING_DIM
 from pedestrian_reid.runtime import configure_torch_runtime
 
 
@@ -41,6 +42,11 @@ DEFAULT_BEST_VARIANT = VARIANT_STANDARD
 DEFAULT_FEATURE_KEY = REID_FEATURE_KEY
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
+DEFAULT_USE_PART_BRANCH = False
+DEFAULT_PARTS = DEFAULT_NUM_PARTS
+DEFAULT_PART_EMBEDDING_DIM = PART_EMBEDDING_DIM
+DEFAULT_PART_TRIPLET_WEIGHT = 0.0
+DEFAULT_CLOTH_INVARIANT_WEIGHT = 0.0
 DEFAULT_LR_MILESTONES = "40,70,100"
 DEFAULT_LR_GAMMA = 0.1
 DEFAULT_FLIP_PROBABILITY = 0.5
@@ -88,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_FEATURE_KEY)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
     parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
+    parser.add_argument("--use-part-branch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PART_BRANCH)
+    parser.add_argument("--num-parts", type=int, default=DEFAULT_PARTS)
+    parser.add_argument("--part-embedding-dim", type=int, default=DEFAULT_PART_EMBEDDING_DIM)
+    parser.add_argument("--part-triplet-weight", type=float, default=DEFAULT_PART_TRIPLET_WEIGHT)
+    parser.add_argument("--cloth-invariant-weight", type=float, default=DEFAULT_CLOTH_INVARIANT_WEIGHT)
     parser.add_argument("--lr-milestones", default=DEFAULT_LR_MILESTONES)
     parser.add_argument("--lr-gamma", type=float, default=DEFAULT_LR_GAMMA)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)

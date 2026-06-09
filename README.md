@@ -1,7 +1,8 @@
 # PedestrianReID
 
 This project now has a standalone pure PyTorch ReID path under `pedestrian_reid`.
-It uses a pure PyTorch ResNet50-IBN backbone with BNNeck and CAL.
+It uses a pure PyTorch ResNet50-IBN backbone with BNNeck, CAL, and an optional
+PCB-style part branch for changed-clothes PRCC transfer.
 It initializes the custom ResNet50-IBN backbone from ImageNet ResNet50 weights.
 It does not use external ReID frameworks.
 
@@ -58,9 +59,10 @@ conditional sketch/CAL paths can temporarily leave parameters unused.
 
 CAL requires clothes labels, so `--cal-weight` defaults to `0.5` and should be
 used with PRCC or joint training. Market-1501 does not provide clothes labels.
-Joint training uses source-balanced identity sampling by default, with half of
-each batch's identities from PRCC. PRCC sketch images are used as training-only
-pose/shape supervision by default; evaluation and deployment still use RGB only.
+Joint training uses source-balanced identity sampling by default. The transfer
+recipe below uses a PRCC-heavy ratio so 75% of each batch's identities come from
+PRCC. PRCC sketch images are used as training-only pose/shape supervision by
+default; evaluation and deployment still use RGB only.
 CAL uses PRCC outfit-level labels: each person's A/B images are one outfit and
 C images are another outfit.
 PRCC sampling is clothes-aware: for each sampled PRCC identity, the `--instances`
@@ -71,7 +73,7 @@ Useful PRCC options:
 
 ```powershell
 --sketch-loss-weight 0.5 --rgb-sketch-consistency-weight 0.2
---prcc-identities-ratio 0.5 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --disable-source-balanced-sampling
+--prcc-identities-ratio 0.75 --cal-warmup-epochs 25 --cal-ramp-epochs 15 --disable-source-balanced-sampling
 --color-jitter-probability 0.5 --random-grayscale-probability 0.2
 --dark-augment-probability 0.15 --occlusion-augment-probability 0.2
 ```
@@ -117,10 +119,12 @@ Resume from a later stage after previous checkpoints already exist:
 START_STAGE=4 bash run.sh
 ```
 
-Useful script overrides:
+`run.sh` uses one GPU by default. Set `GPUS=2` or higher to launch with
+`torchrun --distributed`. Useful script overrides:
 
 ```bash
 GPUS=2 BATCH_SIZE=128 NUM_WORKERS=12 EXP_ROOT=outputs/transfer bash run.sh
+RUN_EXPT4_NOCAL=1 START_STAGE=4 STOP_STAGE=4 bash run.sh
 ```
 
 ### ExpT1: Market Clean Pretraining
@@ -168,18 +172,22 @@ python -m scripts.evaluate --checkpoint outputs/transfer/expT3_market_occlusion/
 
 ### ExpT4: Market to Joint PRCC Transfer
 
-This stage uses Market + PRCC, source-balanced identity sampling, PRCC sketch
-consistency, clothes-aware PRCC identity sampling, and CAL:
+This stage uses Market + PRCC, PRCC-heavy source-balanced identity sampling,
+PRCC sketch consistency, clothes-aware PRCC identity sampling, a PCB-style
+local part branch, PRCC cross-clothes invariance, and low-weight CAL:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode joint --epochs 80 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 20 --cal-ramp-epochs 20 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.5 --best-metric mAP --best-variant standard --eval-period 10 --lr-milestones 30,55,70 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
+python -m scripts.train --mode joint --epochs 40 --batch-size 128 --num-workers 12 --lr 0.00005 --cal-weight 0.003 --cal-warmup-epochs 25 --cal-ramp-epochs 15 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.75 --use-part-branch --num-parts 6 --part-embedding-dim 256 --part-triplet-weight 0.5 --cloth-invariant-weight 0.2 --feature-key combined_features --best-metric mAP --best-variant standard --eval-period 5 --lr-milestones 25,35 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
 ```
+
+For the no-CAL control run, keep every option above and set `--cal-weight 0`,
+or run `RUN_EXPT4_NOCAL=1 START_STAGE=4 STOP_STAGE=4 bash run.sh`.
 
 Evaluate ExpT4:
 
 ```powershell
-python -m scripts.evaluate --checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --dataset market
-python -m scripts.evaluate --checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --dataset market --feature-key combined_features
+python -m scripts.evaluate --checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --dataset prcc --feature-key combined_features
 ```
 
 ### ExpT5: PRCC Fine-tuning
@@ -189,13 +197,13 @@ PRCC. Since it is PRCC-only, it uses clothes-aware identity sampling instead of
 source-balanced Market/PRCC sampling:
 
 ```powershell
-torchrun --nproc_per_node=2 -m scripts.train --distributed --mode prcc --epochs 30 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0.03 --cal-warmup-epochs 10 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --best-metric mAP --best-variant standard --eval-period 10 --lr-milestones 10,20 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --output-dir outputs/transfer/expT5_prcc_finetune
+python -m scripts.train --mode prcc --epochs 20 --batch-size 128 --num-workers 12 --lr 0.00003 --cal-weight 0.003 --cal-warmup-epochs 5 --cal-ramp-epochs 10 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.01 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --use-part-branch --num-parts 6 --part-embedding-dim 256 --part-triplet-weight 0.5 --cloth-invariant-weight 0.2 --feature-key combined_features --best-metric mAP --best-variant standard --eval-period 5 --lr-milestones 10,15 --color-jitter-probability 0.5 --random-grayscale-probability 0.25 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT4_market_to_joint_prcc/best.pth --output-dir outputs/transfer/expT5_prcc_finetune
 ```
 
 Evaluate ExpT5:
 
 ```powershell
-python -m scripts.evaluate --checkpoint outputs/transfer/expT5_prcc_finetune/best.pth --dataset prcc
+python -m scripts.evaluate --checkpoint outputs/transfer/expT5_prcc_finetune/best.pth --dataset prcc --feature-key combined_features
 ```
 
 Historical full/sketch ablations were kept for comparison only; the transfer

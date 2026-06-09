@@ -15,10 +15,12 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
-from pedestrian_reid.builders import build_train_loader, build_training_dataset
+from pedestrian_reid.builders import MODE_MARKET, build_train_loader, build_training_dataset
+from pedestrian_reid.data.datasets import PRCC_SOURCE, UNKNOWN_CLOTHES
 from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, primary_eval_metric
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.losses import batch_hard_triplet_loss
+from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY
 from pedestrian_reid.modules.model import PedestrianReIDNet, load_imagenet_pretrained_backbone
 
 
@@ -35,6 +37,9 @@ TRAIN_METRIC_FIELDS = [
     "cal",
     "sketch",
     "consistency",
+    "part_triplet",
+    "cloth_invariant",
+    "valid_cross_clothes_pairs",
     "effective_cal_weight",
     "effective_sketch_consistency_weight",
 ]
@@ -58,6 +63,11 @@ ENV_LOCAL_RANK = "LOCAL_RANK"
 FREEZABLE_BACKBONE_LAYERS = {"stem", "layer1", "layer2", "layer3", "layer4"}
 PRETRAIN_SKIP_PREVIEW_LIMIT = 10
 MIN_IMAGENET_PRETRAINED_TENSORS = 300
+PRCC_EXPECTED_CLOTHES_PER_IDENTITY = 2
+MIN_PARTS = 1
+NO_PART_LOSS = 0.0
+NO_CLOTH_INVARIANT_LOSS = 0.0
+UPPER_TRIANGLE_DIAGONAL = 1
 AUGMENT_PROBABILITY_ARGS = (
     "flip_probability",
     "color_jitter_probability",
@@ -79,6 +89,53 @@ class DistributedContext:
         return self.rank == 0
 
 
+@dataclass(frozen=True)
+class CheckpointResumeState:
+    start_epoch: int = 0
+    best_metric_value: float = 0.0
+
+
+@dataclass(frozen=True, kw_only=True)
+class CheckpointTarget:
+    model: torch.nn.Module
+    optimizer: torch.optim.Optimizer
+    scheduler: object
+
+
+@dataclass(frozen=True, kw_only=True)
+class TrainingRun:
+    model: torch.nn.Module
+    loader: object
+    optimizer: torch.optim.Optimizer
+    scheduler: object
+    scaler: object
+    resume_state: CheckpointResumeState
+    dataset: object
+    device: torch.device
+    args: Namespace
+    distributed: DistributedContext
+    pretrained_count: int | None
+
+
+@dataclass(frozen=True)
+class AuxiliaryLosses:
+    part_triplet: torch.Tensor
+    cloth_invariant: torch.Tensor
+    valid_cross_clothes_pairs: torch.Tensor
+
+
+@dataclass(frozen=True, kw_only=True)
+class LossComponents:
+    ce: torch.Tensor
+    triplet: torch.Tensor
+    cal: torch.Tensor
+    sketch: torch.Tensor
+    consistency: torch.Tensor
+    auxiliary: AuxiliaryLosses
+    effective_cal_weight: float
+    consistency_weight: float
+
+
 def train_from_args(args: Namespace) -> None:
     distributed = initialize_distributed(args)
     try:
@@ -86,17 +143,31 @@ def train_from_args(args: Namespace) -> None:
         validate_training_args(args, distributed)
         device = training_device(args, distributed)
         dataset = build_training_dataset(args)
-        validate_training_dataset(dataset)
+        validate_training_dataset(dataset, args)
         loader = build_train_loader(dataset, args, distributed)
         _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
-        model = PedestrianReIDNet(dataset.num_classes, num_clothes_classes=dataset.num_clothes_classes).to(device)
+        model = build_model(dataset, args).to(device)
         pretrained_count = initialize_model_weights(model, args, distributed)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         scheduler = build_lr_scheduler(optimizer, args)
         scaler = _build_grad_scaler(args, device)
-        start_epoch = load_checkpoint(args.resume, model, optimizer, scheduler)
+        resume_state = load_checkpoint(args.resume, CheckpointTarget(model=model, optimizer=optimizer, scheduler=scheduler))
         model = configure_parallel_model(model, args, device, distributed)
-        run_training(model, loader, optimizer, scheduler, scaler, start_epoch, dataset, device, args, distributed, pretrained_count)
+        run_training(
+            TrainingRun(
+                model=model,
+                loader=loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                resume_state=resume_state,
+                dataset=dataset,
+                device=device,
+                args=args,
+                distributed=distributed,
+                pretrained_count=pretrained_count,
+            )
+        )
     finally:
         cleanup_distributed(distributed)
 
@@ -115,6 +186,16 @@ def initialize_model_weights(model: PedestrianReIDNet, args: Namespace, distribu
     loaded = load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
     _require_imagenet_pretrained_parameters(loaded)
     return loaded
+
+
+def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
+    return PedestrianReIDNet(
+        dataset.num_classes,
+        num_clothes_classes=dataset.num_clothes_classes,
+        use_part_branch=args.use_part_branch,
+        num_parts=args.num_parts,
+        part_embedding_dim=args.part_embedding_dim,
+    )
 
 
 def load_compatible_pretrained_checkpoint(model: PedestrianReIDNet, path: str, distributed: DistributedContext) -> int:
@@ -351,12 +432,55 @@ def train_one_epoch(
     return metrics
 
 
-def validate_training_dataset(dataset) -> None:
+def validate_training_dataset(dataset, args: Namespace) -> None:
     _validate_contiguous_targets(_target_values(dataset.samples, "label"), dataset.num_classes, "identity label")
     clothes = _target_values(dataset.samples, "clothes_id")
     known_clothes = [value for value in clothes if value >= 0]
     if known_clothes:
         _validate_contiguous_targets(known_clothes, dataset.num_clothes_classes, "clothes label")
+    _validate_prcc_cal_labels(dataset, args)
+
+
+def _validate_prcc_cal_labels(dataset, args: Namespace) -> None:
+    if args.cal_weight <= NO_CAL_LOSS:
+        return
+    prcc_samples = _valid_prcc_samples(dataset)
+    if not prcc_samples:
+        return
+    _require_known_prcc_clothes(prcc_samples)
+    clothes_by_pid = _prcc_clothes_by_pid(prcc_samples)
+    _require_prcc_outfit_count(clothes_by_pid)
+    _require_prcc_outfit_label_count(prcc_samples, clothes_by_pid)
+
+
+def _valid_prcc_samples(dataset) -> list:
+    return [sample for sample in dataset.samples if sample.source == PRCC_SOURCE and not sample.is_junk]
+
+
+def _require_known_prcc_clothes(samples: list) -> None:
+    unknown_pids = sorted({sample.pid for sample in samples if sample.clothes_id == UNKNOWN_CLOTHES})
+    if unknown_pids:
+        raise ValueError(f"PRCC CAL requires known clothes labels; unknown_pids={unknown_pids[:10]}")
+
+
+def _prcc_clothes_by_pid(samples: list) -> dict[int, set[int]]:
+    clothes_by_pid: dict[int, set[int]] = {}
+    for sample in samples:
+        clothes_by_pid.setdefault(sample.pid, set()).add(sample.clothes_id)
+    return clothes_by_pid
+
+
+def _require_prcc_outfit_count(clothes_by_pid: dict[int, set[int]]) -> None:
+    invalid = [pid for pid, clothes in clothes_by_pid.items() if len(clothes) != PRCC_EXPECTED_CLOTHES_PER_IDENTITY]
+    if invalid:
+        raise ValueError(f"PRCC CAL requires 2 outfit labels per identity; invalid_pids={invalid[:10]}")
+
+
+def _require_prcc_outfit_label_count(samples: list, clothes_by_pid: dict[int, set[int]]) -> None:
+    expected = len(clothes_by_pid) * PRCC_EXPECTED_CLOTHES_PER_IDENTITY
+    actual = len({sample.clothes_id for sample in samples})
+    if actual != expected:
+        raise ValueError(f"PRCC clothes labels must be outfit-level; expected={expected} actual={actual}")
 
 
 def validate_training_args(args: Namespace, distributed: DistributedContext) -> None:
@@ -370,6 +494,20 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
         raise ValueError("sketch_loss_weight must be >= 0")
     if args.rgb_sketch_consistency_weight < 0:
         raise ValueError("rgb_sketch_consistency_weight must be >= 0")
+    if args.part_triplet_weight < 0:
+        raise ValueError("part_triplet_weight must be >= 0")
+    if args.cloth_invariant_weight < 0:
+        raise ValueError("cloth_invariant_weight must be >= 0")
+    if args.num_parts < MIN_PARTS:
+        raise ValueError(f"num_parts must be >= {MIN_PARTS}")
+    if args.part_embedding_dim <= 0:
+        raise ValueError("part_embedding_dim must be > 0")
+    if args.part_triplet_weight > NO_PART_LOSS and not args.use_part_branch:
+        raise ValueError("part_triplet_weight requires --use-part-branch")
+    if args.cloth_invariant_weight > NO_CLOTH_INVARIANT_LOSS and args.mode == MODE_MARKET:
+        raise ValueError("cloth_invariant_weight requires PRCC or joint mode")
+    if args.feature_key == COMBINED_FEATURE_KEY and not args.use_part_branch:
+        raise ValueError("combined_features requires --use-part-branch")
     if args.sketch_warmup_epochs < 0:
         raise ValueError("sketch_warmup_epochs must be >= 0")
     if args.sketch_ramp_epochs < 0:
@@ -412,41 +550,57 @@ def _validate_freeze_args(args: Namespace) -> None:
 
 def save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, metric_name: str, metric_value: float, dataset, variant: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    base_model = _unwrap_model(model)
     payload = {
-        "model": _unwrap_model(model).state_dict(),
+        "model": base_model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
+        "model_config": _model_config(base_model),
     }
     payload.update(_checkpoint_metadata(epoch, metric_name, metric_value, dataset, variant))
     torch.save(payload, path)
 
 
-def load_checkpoint(path: str, model, optimizer, scheduler) -> int:
+def load_checkpoint(path: str, target: CheckpointTarget) -> CheckpointResumeState:
     if not path:
-        return 0
+        return CheckpointResumeState()
     checkpoint = torch.load(path, map_location="cpu")
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    scheduler.load_state_dict(checkpoint["scheduler"])
-    return int(checkpoint["epoch"]) + 1
+    target.model.load_state_dict(checkpoint["model"])
+    target.optimizer.load_state_dict(checkpoint["optimizer"])
+    target.scheduler.load_state_dict(checkpoint["scheduler"])
+    return CheckpointResumeState(
+        start_epoch=int(checkpoint["epoch"]) + 1,
+        best_metric_value=float(checkpoint["best_metric_value"]),
+    )
 
 
-def run_training(model, loader, optimizer, scheduler, scaler, start_epoch: int, dataset, device, args, distributed, pretrained_count) -> None:
-    best_metric_value = 0.0
-    output_dir = Path(args.output_dir)
-    if distributed.is_main:
+def run_training(run: TrainingRun) -> None:
+    start_epoch = run.resume_state.start_epoch
+    best_metric_value = run.resume_state.best_metric_value
+    output_dir = Path(run.args.output_dir)
+    if run.distributed.is_main:
         _initialize_metric_files(output_dir, start_epoch)
-        _write_run_config(output_dir, args, dataset, loader, distributed, scheduler, pretrained_count)
-        print(_training_header(args, loader, distributed))
-    for epoch in range(start_epoch, args.epochs):
-        rank_zero_print(distributed, f"epoch={epoch + 1}/{args.epochs}")
-        metrics = train_one_epoch(model, loader, optimizer, scaler, device, args, epoch, distributed)
-        if distributed.is_main:
+        _write_run_config(output_dir, run.args, run.dataset, run.loader, run.distributed, run.scheduler, run.pretrained_count)
+        print(_training_header(run.args, run.loader, run.distributed))
+    for epoch in range(start_epoch, run.args.epochs):
+        rank_zero_print(run.distributed, f"epoch={epoch + 1}/{run.args.epochs}")
+        metrics = train_one_epoch(run.model, run.loader, run.optimizer, run.scaler, run.device, run.args, epoch, run.distributed)
+        if run.distributed.is_main:
             _print_epoch(epoch, metrics)
             _write_train_metrics(output_dir, epoch, metrics)
-        if (epoch + 1) % args.eval_period == 0 or epoch + 1 == args.epochs:
-            best_metric_value = _evaluate_epoch(model, optimizer, scheduler, epoch, dataset, best_metric_value, device, args, distributed)
-        scheduler.step()
+        if (epoch + 1) % run.args.eval_period == 0 or epoch + 1 == run.args.epochs:
+            best_metric_value = _evaluate_epoch(
+                run.model,
+                run.optimizer,
+                run.scheduler,
+                epoch,
+                run.dataset,
+                best_metric_value,
+                run.device,
+                run.args,
+                run.distributed,
+            )
+        run.scheduler.step()
 
 
 def _train_batch(
@@ -473,7 +627,18 @@ def _train_batch(
     triplet = batch_hard_triplet_loss(outputs["features"].float(), labels, args.triplet_margin)
     cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
     sketch_loss, consistency_loss = _sketch_losses(sketch_context, outputs, sketch_outputs, device, args, effective_consistency_weight)
-    loss = _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss, effective_cal_weight, effective_consistency_weight)
+    auxiliary = _auxiliary_losses(outputs, labels, clothes_labels, batch["source"], args, device)
+    components = LossComponents(
+        ce=ce_loss,
+        triplet=triplet,
+        cal=cal_loss,
+        sketch=sketch_loss,
+        consistency=consistency_loss,
+        auxiliary=auxiliary,
+        effective_cal_weight=effective_cal_weight,
+        consistency_weight=effective_consistency_weight,
+    )
+    loss = _total_loss(args, components)
     optimizer.zero_grad()
     scaler.scale(loss).backward()
     scaler.step(optimizer)
@@ -485,6 +650,9 @@ def _train_batch(
         "cal": cal_loss,
         "sketch": sketch_loss,
         "consistency": consistency_loss,
+        "part_triplet": auxiliary.part_triplet,
+        "cloth_invariant": auxiliary.cloth_invariant,
+        "valid_cross_clothes_pairs": auxiliary.valid_cross_clothes_pairs,
     }
 
 
@@ -589,14 +757,73 @@ def _optional_triplet(features: torch.Tensor, labels: torch.Tensor, margin: floa
     return batch_hard_triplet_loss(features, labels, margin)
 
 
+def _auxiliary_losses(outputs, labels: torch.Tensor, clothes_labels: torch.Tensor, sources, args, device) -> AuxiliaryLosses:
+    part_triplet = _part_triplet_loss(outputs, labels, args, device)
+    cloth_invariant, pair_count = _cloth_invariant_loss(outputs, labels, clothes_labels, sources, args, device)
+    return AuxiliaryLosses(part_triplet, cloth_invariant, pair_count)
+
+
+def _part_triplet_loss(outputs, labels: torch.Tensor, args, device) -> torch.Tensor:
+    if args.part_triplet_weight <= NO_PART_LOSS:
+        return _zero_loss(device)
+    if "part_features" not in outputs:
+        return _zero_loss(device)
+    part_features = F.normalize(outputs["part_features"].flatten(1).float(), dim=1)
+    return _optional_triplet(part_features, labels, args.triplet_margin)
+
+
+def _cloth_invariant_loss(outputs, labels: torch.Tensor, clothes_labels: torch.Tensor, sources, args, device):
+    if args.cloth_invariant_weight <= NO_CLOTH_INVARIANT_LOSS:
+        return _zero_loss(device), _zero_pair_count(device)
+    pair_mask = _cross_clothes_pair_mask(labels, clothes_labels, sources, device)
+    pair_count = pair_mask.sum()
+    if pair_count.item() == 0:
+        return _zero_loss(device), _zero_pair_count(device)
+    similarities = _pairwise_cosine(_invariant_features(outputs).float())
+    return (1.0 - similarities[pair_mask]).mean(), pair_count.float()
+
+
+def _cross_clothes_pair_mask(labels: torch.Tensor, clothes_labels: torch.Tensor, sources, device) -> torch.Tensor:
+    source_mask = _source_mask(sources, device)
+    same_identity = labels.unsqueeze(0).eq(labels.unsqueeze(1))
+    different_clothes = clothes_labels.unsqueeze(0).ne(clothes_labels.unsqueeze(1))
+    known_clothes = clothes_labels.ge(0)
+    valid_source = source_mask.unsqueeze(0) & source_mask.unsqueeze(1)
+    valid_clothes = known_clothes.unsqueeze(0) & known_clothes.unsqueeze(1)
+    pair_mask = same_identity & different_clothes & valid_source & valid_clothes
+    return torch.triu(pair_mask, diagonal=UPPER_TRIANGLE_DIAGONAL)
+
+
+def _source_mask(sources, device) -> torch.Tensor:
+    return torch.tensor([source == PRCC_SOURCE for source in sources], dtype=torch.bool, device=device)
+
+
+def _pairwise_cosine(features: torch.Tensor) -> torch.Tensor:
+    normalized = F.normalize(features, dim=1)
+    return normalized @ normalized.t()
+
+
+def _invariant_features(outputs) -> torch.Tensor:
+    if "combined_features" in outputs:
+        return outputs["combined_features"]
+    return outputs["features"]
+
+
+def _zero_pair_count(device: torch.device) -> torch.Tensor:
+    return torch.zeros((), device=device)
+
+
 def _consistency_loss(rgb_features: torch.Tensor, sketch_features: torch.Tensor) -> torch.Tensor:
     return 1.0 - F.cosine_similarity(rgb_features, sketch_features, dim=1).mean()
 
 
-def _total_loss(args, ce_loss, triplet, cal_loss, sketch_loss, consistency_loss, effective_cal_weight: float, consistency_weight: float):
-    loss = ce_loss + args.triplet_weight * triplet + effective_cal_weight * cal_loss
-    loss = loss + args.sketch_loss_weight * sketch_loss
-    return loss + consistency_weight * consistency_loss
+def _total_loss(args, components: LossComponents):
+    loss = components.ce + args.triplet_weight * components.triplet
+    loss = loss + components.effective_cal_weight * components.cal
+    loss = loss + args.sketch_loss_weight * components.sketch
+    loss = loss + components.consistency_weight * components.consistency
+    loss = loss + args.part_triplet_weight * components.auxiliary.part_triplet
+    return loss + args.cloth_invariant_weight * components.auxiliary.cloth_invariant
 
 
 def _evaluate_and_save(model, optimizer, scheduler, epoch: int, dataset, best: float, device, args) -> float:
@@ -604,8 +831,9 @@ def _evaluate_and_save(model, optimizer, scheduler, epoch: int, dataset, best: f
     eval_metrics = evaluate_enabled_datasets(eval_model, device, args)
     selected_metric = primary_eval_metric(eval_metrics, args.best_metric, args.best_variant)
     output_dir = Path(args.output_dir)
+    best_metric_value = max(best, selected_metric)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
-    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, scheduler, epoch, args.best_metric, selected_metric, dataset, args.best_variant)
+    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, scheduler, epoch, args.best_metric, best_metric_value, dataset, args.best_variant)
     if selected_metric <= best:
         return best
     save_checkpoint(output_dir / CHECKPOINT_BEST, eval_model, optimizer, scheduler, epoch, args.best_metric, selected_metric, dataset, args.best_variant)
@@ -631,7 +859,17 @@ def _accumulate(totals: dict[str, float], losses: dict[str, torch.Tensor]) -> No
 
 
 def _empty_epoch_totals() -> dict[str, float]:
-    return {"loss": 0.0, "ce": 0.0, "triplet": 0.0, "cal": 0.0, "sketch": 0.0, "consistency": 0.0}
+    return {
+        "loss": 0.0,
+        "ce": 0.0,
+        "triplet": 0.0,
+        "cal": 0.0,
+        "sketch": 0.0,
+        "consistency": 0.0,
+        "part_triplet": 0.0,
+        "cloth_invariant": 0.0,
+        "valid_cross_clothes_pairs": 0.0,
+    }
 
 
 def _zero_loss(device: torch.device) -> torch.Tensor:
@@ -670,6 +908,7 @@ def _dataset_summary(dataset) -> dict:
         "clothes_classes": dataset.num_clothes_classes,
         "source_samples": _count_by_source(valid_samples),
         "source_identities": _count_identities_by_source(valid_samples),
+        "source_clothes_classes": _count_clothes_by_source(valid_samples),
     }
 
 
@@ -718,6 +957,14 @@ def _count_identities_by_source(samples) -> dict[str, int]:
     for sample in samples:
         identities.setdefault(sample.source, set()).add(sample.label)
     return {source: len(labels) for source, labels in identities.items()}
+
+
+def _count_clothes_by_source(samples) -> dict[str, int]:
+    clothes: dict[str, set[int]] = {}
+    for sample in samples:
+        if sample.clothes_id != UNKNOWN_CLOTHES:
+            clothes.setdefault(sample.source, set()).add(sample.clothes_id)
+    return {source: len(labels) for source, labels in clothes.items()}
 
 
 def _write_header(path: Path, fieldnames: list[str]) -> None:
@@ -785,6 +1032,9 @@ def _batch_metrics(losses: dict[str, torch.Tensor], cal_weight: float, consisten
         "cal": f"{losses['cal'].item():.4f}",
         "sk": f"{losses['sketch'].item():.4f}",
         "con": f"{losses['consistency'].item():.4f}",
+        "part": f"{losses['part_triplet'].item():.4f}",
+        "cloth": f"{losses['cloth_invariant'].item():.4f}",
+        "pairs": f"{losses['valid_cross_clothes_pairs'].item():.0f}",
         "cal_w": f"{cal_weight:.4f}",
         "con_w": f"{consistency_weight:.4f}",
     }
@@ -810,11 +1060,22 @@ def _checkpoint_metadata(epoch: int, metric_name: str, metric_value: float, data
     }
 
 
+def _model_config(model) -> dict[str, int | bool]:
+    return {
+        "embedding_dim": int(model.embedding_dim),
+        "use_part_branch": bool(model.use_part_branch),
+        "num_parts": int(model.num_parts),
+        "part_embedding_dim": int(model.part_embedding_dim),
+    }
+
+
 def _print_epoch(epoch: int, metrics: dict[str, float]) -> None:
     print(
         f"epoch={epoch + 1} loss={metrics['loss']:.4f} ce={metrics['ce']:.4f} "
         f"triplet={metrics['triplet']:.4f} cal={metrics['cal']:.4f} "
         f"sketch={metrics['sketch']:.4f} consistency={metrics['consistency']:.4f} "
+        f"part={metrics['part_triplet']:.4f} cloth={metrics['cloth_invariant']:.4f} "
+        f"pairs={metrics['valid_cross_clothes_pairs']:.1f} "
         f"cal_w={metrics['effective_cal_weight']:.4f} "
         f"con_w={metrics['effective_sketch_consistency_weight']:.4f}"
     )
@@ -856,6 +1117,10 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"best_metric={args.best_metric}",
         f"best_variant={args.best_variant}",
         f"feature_key={args.feature_key}",
+        f"use_part_branch={args.use_part_branch}",
+        f"num_parts={args.num_parts}",
+        f"part_triplet_weight={args.part_triplet_weight}",
+        f"cloth_invariant_weight={args.cloth_invariant_weight}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",

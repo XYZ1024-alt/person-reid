@@ -10,7 +10,8 @@ TOP_K = 5
 PROTOCOL_STANDARD = "standard"
 PROTOCOL_CLOTH_CHANGE = "cloth_change"
 REID_FEATURE_KEY = "bn_features"
-FEATURE_KEYS = {"features", "bn_features"}
+COMBINED_FEATURE_KEY = "combined_features"
+FEATURE_KEYS = {"features", "bn_features", COMBINED_FEATURE_KEY}
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ def extract_feature_bank(model, loader, device: torch.device, feature_key: str =
     with torch.no_grad():
         for batch in loader:
             outputs = model(batch["image"].to(device))
-            features.append(outputs[feature_key].cpu())
+            features.append(_feature_output(outputs, feature_key).cpu())
             pids.append(batch["pid"])
             camids.append(batch["camid"])
             clothes_ids.append(batch["clothes_id"])
@@ -100,3 +101,9 @@ def _metrics(cmc_total: torch.Tensor, aps: list[float], query_count: int) -> dic
 def _validate_feature_key(feature_key: str) -> None:
     if feature_key not in FEATURE_KEYS:
         raise ValueError(f"feature_key must be one of {sorted(FEATURE_KEYS)}, got {feature_key}")
+
+
+def _feature_output(outputs: dict[str, torch.Tensor], feature_key: str) -> torch.Tensor:
+    if feature_key not in outputs:
+        raise ValueError(f"Model did not produce feature_key={feature_key}; enable the matching model branch")
+    return outputs[feature_key]

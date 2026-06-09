@@ -11,6 +11,8 @@ INPUT_CHANNELS = 3
 STEM_CHANNELS = 64
 BOTTLENECK_EXPANSION = 4
 EMBEDDING_DIM = 256
+PART_EMBEDDING_DIM = 256
+DEFAULT_NUM_PARTS = 6
 REID_FEATURE_DIM = 2048
 CONV1_KERNEL = 7
 CONV3_KERNEL = 3
@@ -22,6 +24,7 @@ LAST_STRIDE = 1
 HALF_RATIO = 2
 GRAD_REVERSE_SCALE = 1.0
 IMAGENET_LOADED_PREFIX = "Loaded ImageNet pretrained backbone parameters"
+MIN_PARTS = 1
 
 
 @dataclass(frozen=True)
@@ -125,18 +128,56 @@ class GradientReverse(torch.autograd.Function):
         return gradients.neg().mul(ctx.scale), None
 
 
-class PedestrianReIDNet(nn.Module):
-    def __init__(self, num_classes: int, embedding_dim: int = EMBEDDING_DIM, num_clothes_classes: int = 0):
+class PartFeatureBranch(nn.Module):
+    def __init__(self, num_parts: int, embedding_dim: int):
         super().__init__()
+        if num_parts < MIN_PARTS:
+            raise ValueError(f"num_parts must be >= {MIN_PARTS}, got {num_parts}")
+        self.num_parts = num_parts
+        self.embedding_dim = embedding_dim
+        self.pool = nn.AdaptiveAvgPool2d((num_parts, 1))
+        self.embeddings = nn.ModuleList(
+            nn.Linear(REID_FEATURE_DIM, embedding_dim, bias=False) for _ in range(num_parts)
+        )
+        self.bnnecks = nn.ModuleList(nn.BatchNorm1d(embedding_dim) for _ in range(num_parts))
+
+    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
+        stripes = self.pool(feature_map).squeeze(-1).permute(0, 2, 1)
+        part_features = [self._part_feature(stripes[:, index, :], index) for index in range(self.num_parts)]
+        return torch.stack(part_features, dim=1)
+
+    def _part_feature(self, stripe: torch.Tensor, index: int) -> torch.Tensor:
+        embedding = self.embeddings[index](stripe)
+        return F.normalize(self.bnnecks[index](embedding), dim=1)
+
+
+class PedestrianReIDNet(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        embedding_dim: int = EMBEDDING_DIM,
+        num_clothes_classes: int = 0,
+        *,
+        use_part_branch: bool = False,
+        num_parts: int = DEFAULT_NUM_PARTS,
+        part_embedding_dim: int = PART_EMBEDDING_DIM,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.use_part_branch = use_part_branch
+        self.num_parts = num_parts
+        self.part_embedding_dim = part_embedding_dim
         self.backbone = ResNet50IBNBackbone()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.embedding = nn.Linear(REID_FEATURE_DIM, embedding_dim, bias=False)
         self.bnneck = nn.BatchNorm1d(embedding_dim)
         self.classifier = nn.Linear(embedding_dim, num_classes, bias=False)
         self.clothes_classifier = _clothes_classifier(embedding_dim, num_clothes_classes)
+        self.part_branch = _part_branch(use_part_branch, num_parts, part_embedding_dim)
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
-        pooled = self.pool(self.backbone(images)).flatten(1)
+        feature_map = self.backbone(images)
+        pooled = self.pool(feature_map).flatten(1)
         embedding = self.embedding(pooled)
         bn_features = self.bnneck(embedding)
         outputs = {
@@ -144,6 +185,10 @@ class PedestrianReIDNet(nn.Module):
             "features": F.normalize(embedding, dim=1),
             "bn_features": F.normalize(bn_features, dim=1),
         }
+        if self.part_branch is not None:
+            part_features = self.part_branch(feature_map)
+            outputs["part_features"] = part_features
+            outputs["combined_features"] = _combined_features(outputs["bn_features"], part_features)
         if self.clothes_classifier is not None:
             reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
             outputs["clothes_logits"] = self.clothes_classifier(reversed_features)
@@ -169,6 +214,17 @@ def _clothes_classifier(embedding_dim: int, num_clothes_classes: int) -> nn.Line
     if num_clothes_classes <= 0:
         return None
     return nn.Linear(embedding_dim, num_clothes_classes, bias=True)
+
+
+def _part_branch(use_part_branch: bool, num_parts: int, embedding_dim: int) -> PartFeatureBranch | None:
+    if not use_part_branch:
+        return None
+    return PartFeatureBranch(num_parts, embedding_dim)
+
+
+def _combined_features(global_features: torch.Tensor, part_features: torch.Tensor) -> torch.Tensor:
+    flattened_parts = part_features.flatten(1)
+    return F.normalize(torch.cat((global_features, flattened_parts), dim=1), dim=1)
 
 
 def load_imagenet_pretrained_backbone(backbone: ResNet50IBNBackbone, *, verbose: bool = True) -> int:
