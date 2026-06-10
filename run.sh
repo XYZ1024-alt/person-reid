@@ -5,7 +5,8 @@ GPUS="${GPUS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
 START_STAGE="${START_STAGE:-1}"
-STOP_STAGE="${STOP_STAGE:-5}"
+STOP_STAGE="${STOP_STAGE:-4}"
+RUN_EXPT4_NODISTILL="${RUN_EXPT4_NODISTILL:-0}"
 TORCHRUN="${TORCHRUN:-torchrun}"
 PYTHON="${PYTHON:-python}"
 
@@ -19,6 +20,7 @@ EXP1="${EXP_ROOT}/expT1_market_clean"
 EXP2="${EXP_ROOT}/expT2_market_dark"
 EXP3="${EXP_ROOT}/expT3_market_occlusion"
 EXP4="${EXP_ROOT}/expT4_market_to_joint_prcc"
+EXP4_NODISTILL="${EXP_ROOT}/expT4_market_to_joint_prcc_nodistill"
 EXP5="${EXP_ROOT}/expT5_prcc_finetune"
 
 run_stage() {
@@ -58,9 +60,11 @@ train_model() {
 
 train_expt4() {
   local output_dir="$1"
+  local distill_weight="$2"
+  local distill_final_weight="$3"
   train_model \
     --mode joint \
-    --epochs 15 \
+    --epochs 25 \
     --batch-size "$BATCH_SIZE" \
     --num-workers "$NUM_WORKERS" \
     --lr 0.00005 \
@@ -76,16 +80,19 @@ train_expt4() {
     --num-parts 6 \
     --part-embedding-dim 256 \
     --part-triplet-weight 0.3 \
-    --cloth-invariant-weight 0.1 \
+    --cloth-invariant-weight 0.2 \
     --combined-global-weight 0.7 \
     --combined-part-weight 0.3 \
     --teacher-checkpoint "$EXP3/best.pth" \
-    --distill-weight 0.2 \
+    --distill-weight "$distill_weight" \
+    --distill-final-weight "$distill_final_weight" \
+    --distill-hold-epochs 0 \
+    --distill-ramp-epochs 3 \
     --feature-key combined_features \
     --best-metric mAP \
     --best-variant standard \
     --eval-period 1 \
-    --lr-milestones 8,12 \
+    --lr-milestones 12,18,22 \
     --freeze-backbone-epochs 10 \
     --freeze-backbone-layers stem,layer1,layer2 \
     --color-jitter-probability 0.5 \
@@ -175,19 +182,26 @@ run_stage 3 train_model \
   --output-dir "$EXP3"
 run_stage 3 evaluate_market "$EXP3/best.pth" combined_features
 
-run_stage 4 train_expt4 "$EXP4"
+run_stage 4 train_expt4 "$EXP4" 0.1 0.05
 run_stage 4 evaluate_market "$EXP4/best.pth" combined_features
 run_stage 4 evaluate_prcc "$EXP4/best.pth" combined_features
 
+if [[ "$RUN_EXPT4_NODISTILL" == "1" ]]; then
+  run_stage 4 train_expt4 "$EXP4_NODISTILL" 0 0
+  run_stage 4 evaluate_market "$EXP4_NODISTILL/best.pth" combined_features
+  run_stage 4 evaluate_prcc "$EXP4_NODISTILL/best.pth" combined_features
+fi
+
 run_stage 5 train_model \
   --mode prcc \
-  --epochs 8 \
+  --epochs 3 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --lr 0.00003 \
   --cal-weight 0 \
   --cal-warmup-epochs 0 \
   --cal-ramp-epochs 0 \
+  --no-use-prcc-sketch \
   --sketch-loss-weight 0 \
   --rgb-sketch-consistency-weight 0 \
   --sketch-warmup-epochs 0 \
@@ -201,12 +215,15 @@ run_stage 5 train_model \
   --combined-part-weight 0.3 \
   --teacher-checkpoint "$EXP4/best.pth" \
   --distill-weight 0.1 \
+  --distill-final-weight 0.1 \
+  --distill-hold-epochs 0 \
+  --distill-ramp-epochs 0 \
   --freeze-backbone-all-epochs \
   --feature-key combined_features \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 1 \
-  --lr-milestones 4,6 \
+  --lr-milestones 1,2 \
   --color-jitter-probability 0.5 \
   --random-grayscale-probability 0.25 \
   --dark-augment-probability 0.05 \

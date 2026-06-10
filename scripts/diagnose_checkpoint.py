@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from pedestrian_reid.data.datasets import ReIDDataset, load_market_samples, relabel_samples
 from pedestrian_reid.data.transforms import ReIDTransform, TransformConfig
 from pedestrian_reid.engine.evaluator import load_model
-from pedestrian_reid.modules.metrics import FEATURE_KEYS
+from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY, FEATURE_KEYS
 from pedestrian_reid.runtime import configure_torch_runtime
 
 
@@ -37,9 +37,13 @@ def main() -> None:
     model = load_model(args.checkpoint, device)
     loader = build_market_train_loader(args)
     print(f"train_classifier_acc={classifier_accuracy(model, loader, device):.4f}")
-    for feature_key in sorted(FEATURE_KEYS):
+    for feature_key in _available_feature_keys(model):
         features, pids = collect_features(model, loader, device, feature_key)
         print(f"train_nn_rank1/{feature_key}={leave_one_out_rank1(features, pids):.4f}")
+
+
+def _available_feature_keys(model) -> list[str]:
+    return sorted(key for key in FEATURE_KEYS if key != COMBINED_FEATURE_KEY or model.use_part_branch)
 
 
 def print_checkpoint_metadata(checkpoint: dict) -> None:

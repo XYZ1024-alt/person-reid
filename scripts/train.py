@@ -55,6 +55,9 @@ DEFAULT_CLOTH_INVARIANT_WEIGHT = 0.0
 DEFAULT_COMBINED_GLOBAL = DEFAULT_COMBINED_GLOBAL_WEIGHT
 DEFAULT_COMBINED_PART = DEFAULT_COMBINED_PART_WEIGHT
 DEFAULT_DISTILL_WEIGHT = 0.0
+DEFAULT_DISTILL_FINAL_WEIGHT = 0.0
+DEFAULT_DISTILL_HOLD_EPOCHS = 0
+DEFAULT_DISTILL_RAMP_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_ALL_EPOCHS = False
 DEFAULT_LR_MILESTONES = "40,70,100"
 DEFAULT_LR_GAMMA = 0.1
@@ -112,6 +115,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--combined-part-weight", type=float, default=DEFAULT_COMBINED_PART)
     parser.add_argument("--teacher-checkpoint", default="")
     parser.add_argument("--distill-weight", type=float, default=DEFAULT_DISTILL_WEIGHT)
+    parser.add_argument("--distill-final-weight", type=float, default=DEFAULT_DISTILL_FINAL_WEIGHT)
+    parser.add_argument("--distill-hold-epochs", type=int, default=DEFAULT_DISTILL_HOLD_EPOCHS)
+    parser.add_argument("--distill-ramp-epochs", type=int, default=DEFAULT_DISTILL_RAMP_EPOCHS)
     parser.add_argument("--freeze-backbone-all-epochs", action="store_true", default=DEFAULT_FREEZE_BACKBONE_ALL_EPOCHS)
     parser.add_argument("--lr-milestones", default=DEFAULT_LR_MILESTONES)
     parser.add_argument("--lr-gamma", type=float, default=DEFAULT_LR_GAMMA)

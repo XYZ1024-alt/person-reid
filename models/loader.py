@@ -19,7 +19,7 @@ class PedestrianReIDPredictor:
         tensor = self.transform(_to_pil_image(image)).unsqueeze(0).to(self.device)
         with torch.no_grad():
             outputs = self.model(tensor)
-        return outputs["features"].squeeze(0)
+        return outputs.get("combined_features", outputs["bn_features"]).squeeze(0)
 
 
 def init_yolo(model_path: str):

@@ -127,7 +127,7 @@ def _market_sample(path: Path) -> ReidSample:
         raise ValueError(f"Invalid Market-1501 filename: {path.name}")
     pid = int(stem_parts[0])
     camid = int(stem_parts[1][1])
-    is_junk = pid <= 0
+    is_junk = pid == JUNK_LABEL
     return ReidSample(MARKET_SOURCE, path, None, pid, camid, UNKNOWN_CLOTHES, pid, is_junk)
 
 
@@ -168,7 +168,7 @@ def _matching_sketch_path(path: Path, rgb_dir: Path, sketch_dir: Path | None) ->
 def _filter_train_junk(samples: list[ReidSample], split: str) -> list[ReidSample]:
     if split != SPLIT_TRAIN:
         return samples
-    return [sample for sample in samples if not sample.is_junk]
+    return [sample for sample in samples if not sample.is_junk and sample.pid > 0]
 
 
 def _image_files(split_dir: Path) -> list[Path]:

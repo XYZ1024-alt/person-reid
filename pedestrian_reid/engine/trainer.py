@@ -104,6 +104,7 @@ class CheckpointTarget:
     model: torch.nn.Module
     optimizer: torch.optim.Optimizer
     scheduler: object
+    scaler: object
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -159,7 +160,7 @@ def train_from_args(args: Namespace) -> None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         scheduler = build_lr_scheduler(optimizer, args)
         scaler = _build_grad_scaler(args, device)
-        resume_state = load_checkpoint(args.resume, CheckpointTarget(model=model, optimizer=optimizer, scheduler=scheduler))
+        resume_state = load_checkpoint(args.resume, CheckpointTarget(model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler))
         model = configure_parallel_model(model, args, device, distributed)
         run_training(
             TrainingRun(
@@ -210,7 +211,7 @@ def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
 
 
 def initialize_teacher(args: Namespace, device: torch.device) -> torch.nn.Module | None:
-    if args.distill_weight <= NO_DISTILL_LOSS:
+    if _max_distill_weight(args) <= NO_DISTILL_LOSS:
         return None
     teacher = load_model(args.teacher_checkpoint, device)
     for parameter in teacher.parameters():
@@ -454,6 +455,7 @@ def train_one_epoch(
     totals = _empty_epoch_totals()
     effective_cal_weight = _effective_cal_weight(args, epoch)
     effective_consistency_weight = _effective_sketch_consistency_weight(args, epoch)
+    effective_distill_weight = _effective_distill_weight(args, epoch)
     progress = tqdm(loader, desc="batches", unit="batch", disable=not distributed.is_main)
     for batch in progress:
         losses = _train_batch(
@@ -466,6 +468,7 @@ def train_one_epoch(
             args=args,
             effective_cal_weight=effective_cal_weight,
             effective_consistency_weight=effective_consistency_weight,
+            effective_distill_weight=effective_distill_weight,
         )
         _accumulate(totals, losses)
         progress.set_postfix(
@@ -473,13 +476,13 @@ def train_one_epoch(
                 losses,
                 cal_weight=effective_cal_weight,
                 consistency_weight=effective_consistency_weight,
-                distill_weight=args.distill_weight,
+                distill_weight=effective_distill_weight,
             )
         )
     metrics = {key: value / len(loader) for key, value in totals.items()}
     metrics["effective_cal_weight"] = effective_cal_weight
     metrics["effective_sketch_consistency_weight"] = effective_consistency_weight
-    metrics["effective_distill_weight"] = args.distill_weight
+    metrics["effective_distill_weight"] = effective_distill_weight
     return metrics
 
 
@@ -593,7 +596,13 @@ def _validate_combined_weight_args(args: Namespace) -> None:
 def _validate_distill_args(args: Namespace) -> None:
     if args.distill_weight < 0:
         raise ValueError("distill_weight must be >= 0")
-    if args.distill_weight > NO_DISTILL_LOSS and not args.teacher_checkpoint:
+    if args.distill_final_weight < 0:
+        raise ValueError("distill_final_weight must be >= 0")
+    if args.distill_hold_epochs < 0:
+        raise ValueError("distill_hold_epochs must be >= 0")
+    if args.distill_ramp_epochs < 0:
+        raise ValueError("distill_ramp_epochs must be >= 0")
+    if _max_distill_weight(args) > NO_DISTILL_LOSS and not args.teacher_checkpoint:
         raise ValueError("distill_weight requires --teacher-checkpoint")
 
 
@@ -615,13 +624,14 @@ def _validate_freeze_args(args: Namespace) -> None:
         raise ValueError(f"Unknown freeze_backbone_layers: {sorted(invalid)}")
 
 
-def save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, metric_name: str, metric_value: float, dataset, variant: str) -> None:
+def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, metric_name: str, metric_value: float, dataset, variant: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     base_model = _unwrap_model(model)
     payload = {
         "model": base_model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict(),
         "model_config": _model_config(base_model),
     }
     payload.update(_checkpoint_metadata(epoch, metric_name, metric_value, dataset, variant))
@@ -635,6 +645,8 @@ def load_checkpoint(path: str, target: CheckpointTarget) -> CheckpointResumeStat
     target.model.load_state_dict(checkpoint["model"])
     target.optimizer.load_state_dict(checkpoint["optimizer"])
     target.scheduler.load_state_dict(checkpoint["scheduler"])
+    if "scaler" in checkpoint:
+        target.scaler.load_state_dict(checkpoint["scaler"])
     return CheckpointResumeState(
         start_epoch=int(checkpoint["epoch"]) + 1,
         best_metric_value=float(checkpoint["best_metric_value"]),
@@ -665,11 +677,13 @@ def run_training(run: TrainingRun) -> None:
         if run.distributed.is_main:
             _print_epoch(epoch, metrics)
             _write_train_metrics(output_dir, epoch, metrics)
+        run.scheduler.step()
         if (epoch + 1) % run.args.eval_period == 0 or epoch + 1 == run.args.epochs:
             best_metric_value = _evaluate_epoch(
                 run.model,
                 run.optimizer,
                 run.scheduler,
+                run.scaler,
                 epoch,
                 run.dataset,
                 best_metric_value,
@@ -677,7 +691,6 @@ def run_training(run: TrainingRun) -> None:
                 run.args,
                 run.distributed,
             )
-        run.scheduler.step()
 
 
 def _train_batch(
@@ -691,6 +704,7 @@ def _train_batch(
     args: Namespace,
     effective_cal_weight: float,
     effective_consistency_weight: float,
+    effective_distill_weight: float,
 ):
     images = batch["image"].to(device, non_blocking=args.pin_memory)
     labels = batch["label"]
@@ -706,7 +720,14 @@ def _train_batch(
     triplet = batch_hard_triplet_loss(outputs["features"].float(), labels, args.triplet_margin)
     cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
     sketch_loss, consistency_loss = _sketch_losses(sketch_context, outputs, sketch_outputs, device, args, effective_consistency_weight)
-    distill_loss = _distill_loss(outputs, teacher=teacher, images=images, device=device, args=args)
+    distill_loss = _distill_loss(
+        outputs,
+        teacher=teacher,
+        images=images,
+        device=device,
+        args=args,
+        distill_weight=effective_distill_weight,
+    )
     auxiliary = _auxiliary_losses(outputs, labels, clothes_labels, batch["source"], args, device)
     components = LossComponents(
         ce=ce_loss,
@@ -718,7 +739,7 @@ def _train_batch(
         auxiliary=auxiliary,
         effective_cal_weight=effective_cal_weight,
         consistency_weight=effective_consistency_weight,
-        distill_weight=args.distill_weight,
+        distill_weight=effective_distill_weight,
     )
     loss = _total_loss(args, components)
     optimizer.zero_grad()
@@ -851,8 +872,9 @@ def _distill_loss(
     images: torch.Tensor,
     device: torch.device,
     args: Namespace,
+    distill_weight: float,
 ) -> torch.Tensor:
-    if teacher is None or args.distill_weight <= NO_DISTILL_LOSS:
+    if teacher is None or distill_weight <= NO_DISTILL_LOSS:
         return _zero_loss(device)
     with torch.no_grad():
         with _autocast_context(args, device):
@@ -932,24 +954,24 @@ def _total_loss(args, components: LossComponents):
     return loss + args.cloth_invariant_weight * components.auxiliary.cloth_invariant
 
 
-def _evaluate_and_save(model, optimizer, scheduler, epoch: int, dataset, best: float, device, args) -> float:
+def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args) -> float:
     eval_model = _unwrap_model(model)
     eval_metrics = evaluate_enabled_datasets(eval_model, device, args)
     selected_metric = primary_eval_metric(eval_metrics, args.best_metric, args.best_variant)
     output_dir = Path(args.output_dir)
     best_metric_value = max(best, selected_metric)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
-    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, scheduler, epoch, args.best_metric, best_metric_value, dataset, args.best_variant)
+    save_checkpoint(output_dir / CHECKPOINT_LAST, eval_model, optimizer, scheduler, scaler, epoch, args.best_metric, best_metric_value, dataset, args.best_variant)
     if selected_metric <= best:
         return best
-    save_checkpoint(output_dir / CHECKPOINT_BEST, eval_model, optimizer, scheduler, epoch, args.best_metric, selected_metric, dataset, args.best_variant)
+    save_checkpoint(output_dir / CHECKPOINT_BEST, eval_model, optimizer, scheduler, scaler, epoch, args.best_metric, selected_metric, dataset, args.best_variant)
     print(f"new_best {args.best_variant}/{args.best_metric}={selected_metric:.4f}")
     return selected_metric
 
 
-def _evaluate_epoch(model, optimizer, scheduler, epoch: int, dataset, best: float, device, args, distributed) -> float:
+def _evaluate_epoch(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args, distributed) -> float:
     if distributed.is_main:
-        best = _evaluate_and_save(model, optimizer, scheduler, epoch, dataset, best, device, args)
+        best = _evaluate_and_save(model, optimizer, scheduler, scaler, epoch, dataset, best, device, args)
     synchronize_distributed(distributed)
     return best
 
@@ -1223,6 +1245,28 @@ def _effective_sketch_consistency_weight(args: Namespace, epoch: int) -> float:
     return args.rgb_sketch_consistency_weight * ramp_index / args.sketch_ramp_epochs
 
 
+def _effective_distill_weight(args: Namespace, epoch: int) -> float:
+    if _max_distill_weight(args) <= NO_DISTILL_LOSS:
+        return NO_DISTILL_LOSS
+    if epoch < args.distill_hold_epochs:
+        return args.distill_weight
+    if args.distill_ramp_epochs == 0:
+        return args.distill_final_weight
+    ramp_index = epoch - args.distill_hold_epochs
+    if ramp_index >= args.distill_ramp_epochs:
+        return args.distill_final_weight
+    progress = ramp_index / args.distill_ramp_epochs
+    return _interpolate(args.distill_weight, args.distill_final_weight, progress)
+
+
+def _interpolate(start: float, stop: float, progress: float) -> float:
+    return start + (stop - start) * progress
+
+
+def _max_distill_weight(args: Namespace) -> float:
+    return max(args.distill_weight, args.distill_final_weight)
+
+
 def _loader_has_persistent_workers(loader) -> bool:
     return bool(getattr(loader, "persistent_workers", False))
 
@@ -1244,6 +1288,9 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"combined_part_weight={args.combined_part_weight}",
         f"teacher_checkpoint={args.teacher_checkpoint}",
         f"distill_weight={args.distill_weight}",
+        f"distill_final_weight={args.distill_final_weight}",
+        f"distill_hold_epochs={args.distill_hold_epochs}",
+        f"distill_ramp_epochs={args.distill_ramp_epochs}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",
