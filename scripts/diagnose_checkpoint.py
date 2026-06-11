@@ -47,7 +47,7 @@ def _available_feature_keys(model) -> list[str]:
 
 
 def print_checkpoint_metadata(checkpoint: dict) -> None:
-    keys = ["epoch", "best_metric", "best_variant", "best_metric_value", "num_classes", "num_clothes_classes"]
+    keys = ["epoch", "best_metric", "best_dataset", "best_variant", "best_metric_value", "num_classes", "num_clothes_classes"]
     for key in keys:
         print(f"checkpoint_{key}={checkpoint.get(key, '')}")
 

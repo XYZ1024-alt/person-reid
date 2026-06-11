@@ -4,7 +4,7 @@ import argparse
 
 import torch
 
-from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC
+from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.engine.trainer import train_from_args
 from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
@@ -44,7 +44,9 @@ DEFAULT_DISTRIBUTED = False
 DEFAULT_DDP_FIND_UNUSED_PARAMETERS = "auto"
 DEFAULT_BEST_METRIC = "rank1"
 DEFAULT_BEST_VARIANT = VARIANT_STANDARD
+DEFAULT_BEST_DATASET = "auto"
 DEFAULT_FEATURE_KEY = REID_FEATURE_KEY
+DEFAULT_TRIPLET_FEATURE_KEY = "features"
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
 DEFAULT_USE_PART_BRANCH = False
@@ -59,6 +61,12 @@ DEFAULT_DISTILL_FINAL_WEIGHT = 0.0
 DEFAULT_DISTILL_HOLD_EPOCHS = 0
 DEFAULT_DISTILL_RAMP_EPOCHS = 0
 DEFAULT_FREEZE_BACKBONE_ALL_EPOCHS = False
+DEFAULT_PRCC_DEV_IDENTITIES = 0
+DEFAULT_PRCC_CE_WEIGHT = 1.0
+DEFAULT_PRCC_CE_FINAL_WEIGHT = 1.0
+DEFAULT_PRCC_CE_RAMP_EPOCHS = 0
+DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT = 0.0
+DEFAULT_CONTRASTIVE_TEMPERATURE = 0.07
 DEFAULT_LR_MILESTONES = "40,70,100"
 DEFAULT_LR_GAMMA = 0.1
 DEFAULT_FLIP_PROBABILITY = 0.5
@@ -103,7 +111,9 @@ def parse_args() -> argparse.Namespace:
     add_augmentation_args(parser)
     parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
     parser.add_argument("--best-variant", choices=[VARIANT_STANDARD, VARIANT_DARK, VARIANT_OCCLUDED], default=DEFAULT_BEST_VARIANT)
+    parser.add_argument("--best-dataset", choices=["auto", MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV], default=DEFAULT_BEST_DATASET)
     parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_FEATURE_KEY)
+    parser.add_argument("--triplet-feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_TRIPLET_FEATURE_KEY)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
     parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
     parser.add_argument("--use-part-branch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PART_BRANCH)
@@ -119,6 +129,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distill-hold-epochs", type=int, default=DEFAULT_DISTILL_HOLD_EPOCHS)
     parser.add_argument("--distill-ramp-epochs", type=int, default=DEFAULT_DISTILL_RAMP_EPOCHS)
     parser.add_argument("--freeze-backbone-all-epochs", action="store_true", default=DEFAULT_FREEZE_BACKBONE_ALL_EPOCHS)
+    parser.add_argument("--prcc-dev-identities", type=int, default=DEFAULT_PRCC_DEV_IDENTITIES)
+    parser.add_argument("--prcc-dev-seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--prcc-ce-weight", type=float, default=DEFAULT_PRCC_CE_WEIGHT)
+    parser.add_argument("--prcc-ce-final-weight", type=float, default=DEFAULT_PRCC_CE_FINAL_WEIGHT)
+    parser.add_argument("--prcc-ce-ramp-epochs", type=int, default=DEFAULT_PRCC_CE_RAMP_EPOCHS)
+    parser.add_argument("--cross-clothes-contrastive-weight", type=float, default=DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT)
+    parser.add_argument("--contrastive-temperature", type=float, default=DEFAULT_CONTRASTIVE_TEMPERATURE)
     parser.add_argument("--lr-milestones", default=DEFAULT_LR_MILESTONES)
     parser.add_argument("--lr-gamma", type=float, default=DEFAULT_LR_GAMMA)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)

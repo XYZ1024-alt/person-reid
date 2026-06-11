@@ -103,9 +103,11 @@ Use `--best-metric mAP` for paper runs so `best.pth` is selected by retrieval
 quality across the ranked list instead of only the first match.
 Use `--best-variant dark` or `--best-variant occluded` when a stage is meant
 to optimize that evaluation condition; otherwise use `standard`.
-During PRCC transfer, `--freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2`
-keeps low-level ResNet50-IBN features fixed at the start, then automatically
-unfreezes them after epoch 10.
+During PRCC transfer, `--freeze-backbone-epochs 40 --freeze-backbone-layers stem,layer1,layer2`
+keeps low-level ResNet50-IBN features frozen for the whole transfer run.
+Two runs showed PRCC mAP rises while these layers stay frozen and drops as soon
+as they unfreeze, so the transfer stage never unfreezes them; layer3, layer4,
+and all heads still train normally.
 
 Run the default transfer experiment through ExpT4:
 
@@ -125,8 +127,34 @@ START_STAGE=4 bash run.sh
 ```bash
 GPUS=2 BATCH_SIZE=128 NUM_WORKERS=12 EXP_ROOT=outputs/transfer bash run.sh
 RUN_EXPT4_NODISTILL=1 START_STAGE=4 STOP_STAGE=4 bash run.sh
+RUN_EXPT4_DEV_ABLATIONS=0 START_STAGE=4 STOP_STAGE=4 bash run.sh
 STOP_STAGE=5 bash run.sh
 ```
+
+By default, stage 4 now runs the three PRCC internal-dev experiments used to
+avoid tuning on the official PRCC test split:
+
+```text
+expT4_dev_control
+expT4_dev_feature_match
+expT4_dev_objective_shift
+```
+
+The internal dev split is selected from PRCC train identities with
+`--prcc-dev-identities 30 --prcc-dev-seed 42`. Training excludes those
+identities, dev query uses C-camera changed-clothes images, and dev gallery
+uses A-camera same-clothes images. `--best-dataset prcc_dev` selects `best.pth`
+by PRCC-dev mAP; the official PRCC test should be evaluated once on the chosen
+dev winner.
+
+The objective-shift experiment adds:
+
+```powershell
+--triplet-feature-key combined_features --prcc-ce-weight 0.2 --prcc-ce-final-weight 0 --prcc-ce-ramp-epochs 5 --cross-clothes-contrastive-weight 0.2 --contrastive-temperature 0.07
+```
+
+Set `EXP4_FOR_EXP5` to the selected stage-4 output directory before running
+the optional ExpT5 fine-tune.
 
 ### ExpT1: Market Clean Pretraining
 
@@ -176,10 +204,11 @@ python -m scripts.evaluate --checkpoint outputs/transfer/expT3_market_occlusion/
 This stage uses Market + PRCC, PRCC-heavy source-balanced identity sampling,
 PRCC sketch consistency, clothes-aware PRCC identity sampling, a PCB-style
 local part branch, PRCC cross-clothes invariance, and weak teacher
-distillation from ExpT3. CAL is disabled in the main transfer run:
+distillation from ExpT3. CAL is disabled: enabling it (weight 0.05 ramping
+from epoch 5) matched the start of a steady PRCC mAP decline in earlier runs:
 
 ```powershell
-python -m scripts.train --mode joint --epochs 25 --batch-size 128 --num-workers 12 --lr 0.00005 --cal-weight 0 --cal-warmup-epochs 0 --cal-ramp-epochs 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 10 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.75 --use-part-branch --num-parts 6 --part-embedding-dim 256 --part-triplet-weight 0.3 --cloth-invariant-weight 0.2 --combined-global-weight 0.7 --combined-part-weight 0.3 --teacher-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --distill-weight 0.1 --distill-final-weight 0.05 --distill-hold-epochs 0 --distill-ramp-epochs 3 --feature-key combined_features --best-metric mAP --best-variant standard --eval-period 1 --lr-milestones 12,18,22 --freeze-backbone-epochs 10 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.2 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
+python -m scripts.train --mode joint --epochs 40 --batch-size 128 --num-workers 12 --lr 0.0001 --cal-weight 0 --cal-warmup-epochs 0 --cal-ramp-epochs 0 --sketch-loss-weight 0 --rgb-sketch-consistency-weight 0.02 --sketch-warmup-epochs 5 --sketch-ramp-epochs 10 --prcc-identities-ratio 0.75 --use-part-branch --num-parts 6 --part-embedding-dim 256 --part-triplet-weight 0.3 --cloth-invariant-weight 0.5 --combined-global-weight 0.7 --combined-part-weight 0.3 --teacher-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --distill-weight 0.05 --distill-final-weight 0.02 --distill-hold-epochs 0 --distill-ramp-epochs 3 --feature-key combined_features --best-metric mAP --best-variant standard --eval-period 1 --lr-milestones 20,30 --freeze-backbone-epochs 40 --freeze-backbone-layers stem,layer1,layer2 --color-jitter-probability 0.5 --random-grayscale-probability 0.3 --dark-augment-probability 0.05 --occlusion-augment-probability 0.1 --pretrained-checkpoint outputs/transfer/expT3_market_occlusion/best.pth --output-dir outputs/transfer/expT4_market_to_joint_prcc
 ```
 
 For the no-distillation control run, keep every option above and set both

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, build_eval_loader
+from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV, build_eval_loader
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.metrics import PROTOCOL_CLOTH_CHANGE, PROTOCOL_STANDARD
 from pedestrian_reid.modules.metrics import evaluate_reid, extract_feature_bank
@@ -46,15 +46,33 @@ def enabled_eval_jobs(args: Namespace) -> list[EvalJob]:
     if args.mode in {MODE_MARKET, MODE_JOINT}:
         jobs.append(EvalJob(MODE_MARKET, args.market_root, PROTOCOL_STANDARD))
     if args.mode in {MODE_PRCC, MODE_JOINT}:
-        jobs.append(EvalJob(MODE_PRCC, args.prcc_root, PROTOCOL_CLOTH_CHANGE))
+        jobs.append(_prcc_eval_job(args))
     return jobs
 
 
-def primary_eval_metric(eval_results, metric_name: str, variant: str) -> float:
+def primary_eval_metric(eval_results, metric_name: str, variant: str, best_dataset: str = "auto") -> float:
+    target = _primary_job_name(eval_results, best_dataset)
     for job, metrics in eval_results:
-        if job.name == MODE_PRCC:
+        if job.name == target:
             return _variant_metric(metrics, metric_name, variant)
-    return _variant_metric(eval_results[0][1], metric_name, variant)
+    raise ValueError(f"best_dataset={target} was not evaluated")
+
+
+def _prcc_eval_job(args: Namespace) -> EvalJob:
+    if int(getattr(args, "prcc_dev_identities", 0)) > 0:
+        return EvalJob(MODE_PRCC_DEV, args.prcc_root, PROTOCOL_CLOTH_CHANGE)
+    return EvalJob(MODE_PRCC, args.prcc_root, PROTOCOL_CLOTH_CHANGE)
+
+
+def _primary_job_name(eval_results, best_dataset: str) -> str:
+    if best_dataset != "auto":
+        return best_dataset
+    names = [job.name for job, _ in eval_results]
+    if MODE_PRCC_DEV in names:
+        return MODE_PRCC_DEV
+    if MODE_PRCC in names:
+        return MODE_PRCC
+    return names[0]
 
 
 def _variant_metric(metrics: dict[str, dict[str, float]], metric_name: str, variant: str) -> float:
@@ -68,9 +86,15 @@ def _variant_metric(metrics: dict[str, dict[str, float]], metric_name: str, vari
 def evaluate_checkpoint(args: Namespace) -> None:
     device = torch.device(args.device)
     model = load_model(args.checkpoint, device)
-    protocol = PROTOCOL_CLOTH_CHANGE if args.dataset == MODE_PRCC else PROTOCOL_STANDARD
+    protocol = _checkpoint_protocol(args.dataset)
     metrics = validate_dataset(model, args.root, args.dataset, protocol, device, args)
     print_metrics(metrics)
+
+
+def _checkpoint_protocol(dataset: str) -> str:
+    if dataset in {MODE_PRCC, MODE_PRCC_DEV}:
+        return PROTOCOL_CLOTH_CHANGE
+    return PROTOCOL_STANDARD
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> PedestrianReIDNet:
