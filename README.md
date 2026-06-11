@@ -41,6 +41,30 @@ and `--lr-gamma 0.1`. Each run writes `run_config.json` to the output
 directory with the full argument set, dataset summary, loader summary, DDP
 summary, scheduler settings, and pretrained parameter count.
 
+TensorBoard logging is enabled by default and writes scalars under each stage's
+output directory:
+
+```text
+outputs/transfer/expT4_dev_control/tensorboard
+outputs/transfer/expT4_dev_feature_match/tensorboard
+outputs/transfer/expT4_dev_objective_shift/tensorboard
+```
+
+Start TensorBoard on the server:
+
+```bash
+tensorboard --logdir outputs/transfer --host 0.0.0.0 --port 6006
+```
+
+For SSH port forwarding from your local machine:
+
+```bash
+ssh -L 6006:127.0.0.1:6006 user@server
+```
+
+Then open `http://127.0.0.1:6006`. Disable logging with `--no-tensorboard`,
+or override the per-run directory with `--tensorboard-dir`.
+
 For distributed multi-GPU training, launch with `torchrun` and add
 `--distributed`:
 

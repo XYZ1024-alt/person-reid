@@ -5,3 +5,4 @@ opencv-python
 ultralytics
 tqdm
 matplotlib
+tensorboard

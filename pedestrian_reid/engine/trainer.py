@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import csv
 from dataclasses import dataclass, replace
 import json
@@ -30,6 +30,7 @@ CHECKPOINT_BEST = "best.pth"
 RUN_CONFIG_JSON = "run_config.json"
 TRAIN_METRICS_CSV = "training_metrics.csv"
 EVAL_METRICS_CSV = "evaluation_metrics.csv"
+TENSORBOARD_DIR = "tensorboard"
 TRAIN_METRIC_FIELDS = [
     "epoch",
     "loss",
@@ -738,40 +739,49 @@ def run_training(run: TrainingRun) -> None:
     start_epoch = run.resume_state.start_epoch
     best_metric_value = run.resume_state.best_metric_value
     output_dir = Path(run.args.output_dir)
-    if run.distributed.is_main:
-        _initialize_metric_files(output_dir, start_epoch)
-        _write_run_config(output_dir, run.args, run.dataset, run.loader, run.distributed, run.scheduler, run.pretrained_count)
-        print(_training_header(run.args, run.loader, run.distributed))
-    for epoch in range(start_epoch, run.args.epochs):
-        rank_zero_print(run.distributed, f"epoch={epoch + 1}/{run.args.epochs}")
-        metrics = train_one_epoch(
-            run.model,
-            run.loader,
-            teacher=run.teacher,
-            optimizer=run.optimizer,
-            scaler=run.scaler,
-            device=run.device,
-            args=run.args,
-            epoch=epoch,
-            distributed=run.distributed,
-        )
-        if run.distributed.is_main:
-            _print_epoch(epoch, metrics)
-            _write_train_metrics(output_dir, epoch, metrics)
-        run.scheduler.step()
-        if (epoch + 1) % run.args.eval_period == 0 or epoch + 1 == run.args.epochs:
-            best_metric_value = _evaluate_epoch(
+    with _tensorboard_context(run.args, output_dir, run.distributed) as tensorboard:
+        _initialize_training_outputs(run, output_dir, start_epoch, tensorboard)
+        for epoch in range(start_epoch, run.args.epochs):
+            rank_zero_print(run.distributed, f"epoch={epoch + 1}/{run.args.epochs}")
+            metrics = train_one_epoch(
                 run.model,
-                run.optimizer,
-                run.scheduler,
-                run.scaler,
-                epoch,
-                run.dataset,
-                best_metric_value,
-                run.device,
-                run.args,
-                run.distributed,
+                run.loader,
+                teacher=run.teacher,
+                optimizer=run.optimizer,
+                scaler=run.scaler,
+                device=run.device,
+                args=run.args,
+                epoch=epoch,
+                distributed=run.distributed,
             )
+            if run.distributed.is_main:
+                _print_epoch(epoch, metrics)
+                _write_train_metrics(output_dir, epoch, metrics)
+                _write_tensorboard_train_metrics(tensorboard, epoch, metrics, run.scheduler)
+            run.scheduler.step()
+            if (epoch + 1) % run.args.eval_period == 0 or epoch + 1 == run.args.epochs:
+                best_metric_value = _evaluate_epoch(
+                    run.model,
+                    run.optimizer,
+                    run.scheduler,
+                    run.scaler,
+                    epoch,
+                    run.dataset,
+                    best_metric_value,
+                    run.device,
+                    run.args,
+                    run.distributed,
+                    tensorboard,
+                )
+
+
+def _initialize_training_outputs(run: TrainingRun, output_dir: Path, start_epoch: int, tensorboard) -> None:
+    if not run.distributed.is_main:
+        return
+    _initialize_metric_files(output_dir, start_epoch)
+    _write_run_config(output_dir, run.args, run.dataset, run.loader, run.distributed, run.scheduler, run.pretrained_count)
+    _write_tensorboard_run_metadata(tensorboard, run.args, run.dataset, run.loader, run.distributed)
+    print(_training_header(run.args, run.loader, run.distributed))
 
 
 def _train_batch(
@@ -1095,13 +1105,14 @@ def _total_loss(args, components: LossComponents):
     return loss + args.cross_clothes_contrastive_weight * components.auxiliary.cross_clothes_contrastive
 
 
-def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args) -> float:
+def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args, tensorboard) -> float:
     eval_model = _unwrap_model(model)
     eval_metrics = evaluate_enabled_datasets(eval_model, device, args)
     selected_metric = primary_eval_metric(eval_metrics, args.best_metric, args.best_variant, args.best_dataset)
     output_dir = Path(args.output_dir)
     best_metric_value = max(best, selected_metric)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
+    _write_tensorboard_eval_metrics(tensorboard, epoch, eval_metrics, selected_metric, args)
     request = CheckpointSaveRequest(
         model=eval_model,
         optimizer=optimizer,
@@ -1122,9 +1133,9 @@ def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset,
     return selected_metric
 
 
-def _evaluate_epoch(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args, distributed) -> float:
+def _evaluate_epoch(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args, distributed, tensorboard) -> float:
     if distributed.is_main:
-        best = _evaluate_and_save(model, optimizer, scheduler, scaler, epoch, dataset, best, device, args)
+        best = _evaluate_and_save(model, optimizer, scheduler, scaler, epoch, dataset, best, device, args, tensorboard)
     synchronize_distributed(distributed)
     return best
 
@@ -1161,6 +1172,76 @@ def _zero_loss(device: torch.device) -> torch.Tensor:
     return torch.zeros((), device=device)
 
 
+@contextmanager
+def _tensorboard_context(args: Namespace, output_dir: Path, distributed: DistributedContext):
+    if not getattr(args, "tensorboard", False) or not distributed.is_main:
+        yield None
+        return
+    writer = _build_tensorboard_writer(args, output_dir)
+    try:
+        yield writer
+    finally:
+        writer.close()
+
+
+def _build_tensorboard_writer(args: Namespace, output_dir: Path):
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError as error:
+        message = "TensorBoard logging requires tensorboard; install requirements.txt or pass --no-tensorboard"
+        raise RuntimeError(message) from error
+    return SummaryWriter(log_dir=str(_tensorboard_log_dir(args, output_dir)))
+
+
+def _tensorboard_log_dir(args: Namespace, output_dir: Path) -> Path:
+    raw_dir = getattr(args, "tensorboard_dir", "")
+    if not raw_dir:
+        return output_dir / TENSORBOARD_DIR
+    requested = Path(raw_dir)
+    if requested.is_absolute():
+        return requested
+    return output_dir / requested
+
+
+def _write_tensorboard_run_metadata(writer, args: Namespace, dataset, loader, distributed: DistributedContext) -> None:
+    if writer is None:
+        return
+    writer.add_text("run/args", _markdown_json(vars(args)), 0)
+    writer.add_text("run/dataset", _markdown_json(_dataset_summary(dataset)), 0)
+    writer.add_text("run/loader", _markdown_json(_loader_summary(loader)), 0)
+    writer.add_text("run/distributed", _markdown_json(_distributed_summary(distributed)), 0)
+
+
+def _write_tensorboard_train_metrics(writer, epoch: int, metrics: dict[str, float], scheduler) -> None:
+    if writer is None:
+        return
+    step = epoch + 1
+    for name, value in metrics.items():
+        writer.add_scalar(f"train/{name}", float(value), step)
+    for index, learning_rate in enumerate(scheduler.get_last_lr()):
+        writer.add_scalar(f"train/lr/group_{index}", float(learning_rate), step)
+
+
+def _write_tensorboard_eval_metrics(writer, epoch: int, eval_results, selected_metric: float, args: Namespace) -> None:
+    if writer is None:
+        return
+    step = epoch + 1
+    for job, metrics_by_variant in eval_results:
+        _write_tensorboard_eval_job(writer, step, job.name, metrics_by_variant)
+    selected_tag = f"eval/selected/{args.best_variant}/{args.best_metric}"
+    writer.add_scalar(selected_tag, float(selected_metric), step)
+
+
+def _write_tensorboard_eval_job(writer, step: int, dataset_name: str, metrics_by_variant) -> None:
+    for variant, metrics in metrics_by_variant.items():
+        for name, value in metrics.items():
+            writer.add_scalar(f"eval/{dataset_name}/{variant}/{name}", float(value), step)
+
+
+def _markdown_json(value: dict) -> str:
+    return f"```json\n{json.dumps(value, indent=2, sort_keys=True)}\n```"
+
+
 def _initialize_metric_files(output_dir: Path, start_epoch: int) -> None:
     if start_epoch > 0:
         _ensure_train_metric_header(output_dir / TRAIN_METRICS_CSV)
@@ -1180,6 +1261,7 @@ def _write_run_config(output_dir: Path, args: Namespace, dataset, loader, distri
         "distributed": _distributed_summary(distributed),
         "pretrained_parameter_count": pretrained_count,
         "lr_scheduler": _scheduler_summary(args, scheduler),
+        "tensorboard": _tensorboard_summary(args, output_dir),
     }
     with (output_dir / RUN_CONFIG_JSON).open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2, sort_keys=True)
@@ -1237,6 +1319,13 @@ def _scheduler_summary(args: Namespace, scheduler) -> dict:
         "current_lr": scheduler.get_last_lr(),
         "milestones": _lr_milestones(args.lr_milestones),
         "gamma": args.lr_gamma,
+    }
+
+
+def _tensorboard_summary(args: Namespace, output_dir: Path) -> dict:
+    return {
+        "enabled": bool(getattr(args, "tensorboard", False)),
+        "log_dir": str(_tensorboard_log_dir(args, output_dir)),
     }
 
 
@@ -1486,6 +1575,8 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"prcc_ce_ramp_epochs={args.prcc_ce_ramp_epochs}",
         f"cross_clothes_contrastive_weight={args.cross_clothes_contrastive_weight}",
         f"contrastive_temperature={args.contrastive_temperature}",
+        f"tensorboard={args.tensorboard}",
+        f"tensorboard_dir={_tensorboard_log_dir(args, Path(args.output_dir))}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",
