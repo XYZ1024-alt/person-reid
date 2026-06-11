@@ -31,7 +31,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
     args.root = args.root or default_root(args.dataset)
+    bind_dataset_roots(args)
     return args
+
+
+def bind_dataset_roots(args: argparse.Namespace) -> None:
+    if args.dataset in {MODE_PRCC, MODE_PRCC_DEV}:
+        args.prcc_root = args.root
+        args.market_root = DEFAULT_MARKET_ROOT
+        return
+    args.market_root = args.root
+    args.prcc_root = DEFAULT_PRCC_ROOT
 
 
 def default_root(dataset: str) -> str:

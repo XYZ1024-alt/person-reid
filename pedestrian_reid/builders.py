@@ -139,7 +139,7 @@ def selected_prcc_dev_pids(args: Namespace) -> list[int]:
     count = int(getattr(args, "prcc_dev_identities", NO_PRCC_DEV_IDENTITIES))
     if count == NO_PRCC_DEV_IDENTITIES:
         return []
-    pids = sorted({sample.pid for sample in load_prcc_samples(args.prcc_root, "train")})
+    pids = sorted({sample.pid for sample in load_prcc_samples(_prcc_root(args), "train")})
     _validate_prcc_dev_count(count, pids)
     return sorted(random.Random(args.prcc_dev_seed).sample(pids, count))
 
@@ -180,6 +180,16 @@ def _validate_prcc_dev_count(count: int, pids: list[int]) -> None:
         raise ValueError("prcc_dev_identities must be >= 0")
     if count >= len(pids):
         raise ValueError(f"prcc_dev_identities must be less than PRCC train identities: {count} >= {len(pids)}")
+
+
+def _prcc_root(args: Namespace) -> str | Path:
+    root = getattr(args, "prcc_root", None)
+    if root:
+        return root
+    fallback = getattr(args, "root", None)
+    if fallback:
+        return fallback
+    raise AttributeError("args must provide prcc_root or root for PRCC data")
 
 
 def _require_prcc_root(root: str | Path) -> None:

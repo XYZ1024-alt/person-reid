@@ -8,6 +8,12 @@ START_STAGE="${START_STAGE:-1}"
 STOP_STAGE="${STOP_STAGE:-4}"
 RUN_EXPT4_NODISTILL="${RUN_EXPT4_NODISTILL:-0}"
 RUN_EXPT4_DEV_ABLATIONS="${RUN_EXPT4_DEV_ABLATIONS:-1}"
+TRAIN_EXPT4_DEV_CONTROL="${TRAIN_EXPT4_DEV_CONTROL:-1}"
+EVAL_EXPT4_DEV_CONTROL="${EVAL_EXPT4_DEV_CONTROL:-1}"
+TRAIN_EXPT4_DEV_FEATURE_MATCH="${TRAIN_EXPT4_DEV_FEATURE_MATCH:-1}"
+EVAL_EXPT4_DEV_FEATURE_MATCH="${EVAL_EXPT4_DEV_FEATURE_MATCH:-1}"
+TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT="${TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT:-1}"
+EVAL_EXPT4_DEV_OBJECTIVE_SHIFT="${EVAL_EXPT4_DEV_OBJECTIVE_SHIFT:-1}"
 PRCC_DEV_IDENTITIES="${PRCC_DEV_IDENTITIES:-30}"
 PRCC_DEV_SEED="${PRCC_DEV_SEED:-42}"
 TORCHRUN="${TORCHRUN:-torchrun}"
@@ -237,12 +243,24 @@ run_stage 3 train_model \
 run_stage 3 evaluate_market "$EXP3/best.pth" combined_features
 
 if [[ "$RUN_EXPT4_DEV_ABLATIONS" == "1" ]]; then
-  run_stage 4 train_expt4_dev_control
-  run_stage 4 evaluate_prcc_dev "$EXP4_DEV_CONTROL/best.pth" combined_features
-  run_stage 4 train_expt4_dev_feature_match
-  run_stage 4 evaluate_prcc_dev "$EXP4_DEV_FEATURE_MATCH/best.pth" combined_features
-  run_stage 4 train_expt4_dev_objective_shift
-  run_stage 4 evaluate_prcc_dev "$EXP4_DEV_OBJECTIVE_SHIFT/best.pth" combined_features
+  if [[ "$TRAIN_EXPT4_DEV_CONTROL" == "1" ]]; then
+    run_stage 4 train_expt4_dev_control
+  fi
+  if [[ "$EVAL_EXPT4_DEV_CONTROL" == "1" ]]; then
+    run_stage 4 evaluate_prcc_dev "$EXP4_DEV_CONTROL/best.pth" combined_features
+  fi
+  if [[ "$TRAIN_EXPT4_DEV_FEATURE_MATCH" == "1" ]]; then
+    run_stage 4 train_expt4_dev_feature_match
+  fi
+  if [[ "$EVAL_EXPT4_DEV_FEATURE_MATCH" == "1" ]]; then
+    run_stage 4 evaluate_prcc_dev "$EXP4_DEV_FEATURE_MATCH/best.pth" combined_features
+  fi
+  if [[ "$TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT" == "1" ]]; then
+    run_stage 4 train_expt4_dev_objective_shift
+  fi
+  if [[ "$EVAL_EXPT4_DEV_OBJECTIVE_SHIFT" == "1" ]]; then
+    run_stage 4 evaluate_prcc_dev "$EXP4_DEV_OBJECTIVE_SHIFT/best.pth" combined_features
+  fi
 else
   run_stage 4 train_expt4 "$EXP4" 0.05 0.02
   run_stage 4 evaluate_market "$EXP4/best.pth" combined_features
