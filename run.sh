@@ -8,12 +8,14 @@ START_STAGE="${START_STAGE:-1}"
 STOP_STAGE="${STOP_STAGE:-4}"
 RUN_EXPT4_NODISTILL="${RUN_EXPT4_NODISTILL:-0}"
 RUN_EXPT4_DEV_ABLATIONS="${RUN_EXPT4_DEV_ABLATIONS:-1}"
-TRAIN_EXPT4_DEV_CONTROL="${TRAIN_EXPT4_DEV_CONTROL:-1}"
-EVAL_EXPT4_DEV_CONTROL="${EVAL_EXPT4_DEV_CONTROL:-1}"
-TRAIN_EXPT4_DEV_FEATURE_MATCH="${TRAIN_EXPT4_DEV_FEATURE_MATCH:-1}"
-EVAL_EXPT4_DEV_FEATURE_MATCH="${EVAL_EXPT4_DEV_FEATURE_MATCH:-1}"
-TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT="${TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT:-1}"
-EVAL_EXPT4_DEV_OBJECTIVE_SHIFT="${EVAL_EXPT4_DEV_OBJECTIVE_SHIFT:-1}"
+TRAIN_EXPT4_JOINT_V1="${TRAIN_EXPT4_JOINT_V1:-1}"
+EVAL_EXPT4_JOINT_V1="${EVAL_EXPT4_JOINT_V1:-1}"
+TRAIN_EXPT4_DEV_CONTROL="${TRAIN_EXPT4_DEV_CONTROL:-0}"
+EVAL_EXPT4_DEV_CONTROL="${EVAL_EXPT4_DEV_CONTROL:-0}"
+TRAIN_EXPT4_DEV_FEATURE_MATCH="${TRAIN_EXPT4_DEV_FEATURE_MATCH:-0}"
+EVAL_EXPT4_DEV_FEATURE_MATCH="${EVAL_EXPT4_DEV_FEATURE_MATCH:-0}"
+TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT="${TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT:-0}"
+EVAL_EXPT4_DEV_OBJECTIVE_SHIFT="${EVAL_EXPT4_DEV_OBJECTIVE_SHIFT:-0}"
 PRCC_DEV_IDENTITIES="${PRCC_DEV_IDENTITIES:-30}"
 PRCC_DEV_SEED="${PRCC_DEV_SEED:-42}"
 TORCHRUN="${TORCHRUN:-torchrun}"
@@ -33,7 +35,12 @@ EXP4_NODISTILL="${EXP_ROOT}/expT4_market_to_joint_prcc_nodistill"
 EXP4_DEV_CONTROL="${EXP_ROOT}/expT4_dev_control"
 EXP4_DEV_FEATURE_MATCH="${EXP_ROOT}/expT4_dev_feature_match"
 EXP4_DEV_OBJECTIVE_SHIFT="${EXP_ROOT}/expT4_dev_objective_shift"
-if [[ "$RUN_EXPT4_DEV_ABLATIONS" == "1" ]]; then
+EXP4_JOINT_V1="${EXP_ROOT}/expT4_joint_v1"
+if [[ "$TRAIN_EXPT4_JOINT_V1" == "1" || "$EVAL_EXPT4_JOINT_V1" == "1" ]]; then
+  DEFAULT_EXP4_FOR_EXP5="$EXP4_JOINT_V1"
+elif [[ "$RUN_EXPT4_DEV_ABLATIONS" == "1" && "$TRAIN_EXPT4_DEV_OBJECTIVE_SHIFT" == "1" ]]; then
+  DEFAULT_EXP4_FOR_EXP5="$EXP4_DEV_OBJECTIVE_SHIFT"
+elif [[ "$RUN_EXPT4_DEV_ABLATIONS" == "1" ]]; then
   DEFAULT_EXP4_FOR_EXP5="$EXP4_DEV_OBJECTIVE_SHIFT"
 else
   DEFAULT_EXP4_FOR_EXP5="$EXP4"
@@ -163,6 +170,54 @@ train_expt4_dev_objective_shift() {
     --contrastive-temperature 0.07
 }
 
+train_expt4_joint_v1() {
+  train_model \
+    --mode joint \
+    --epochs 60 \
+    --batch-size "$BATCH_SIZE" \
+    --num-workers "$NUM_WORKERS" \
+    --lr 0.0001 \
+    --cal-weight 0 \
+    --cal-warmup-epochs 0 \
+    --cal-ramp-epochs 0 \
+    --sketch-loss-weight 0.3 \
+    --rgb-sketch-consistency-weight 0.15 \
+    --sketch-warmup-epochs 5 \
+    --sketch-ramp-epochs 15 \
+    --prcc-identities-ratio 0.85 \
+    --use-part-branch \
+    --num-parts 6 \
+    --part-embedding-dim 256 \
+    --part-triplet-weight 0.3 \
+    --cloth-invariant-weight 0.5 \
+    --combined-global-weight 0.7 \
+    --combined-part-weight 0.3 \
+    --distill-weight 0 \
+    --distill-final-weight 0 \
+    --triplet-feature-key combined_features \
+    --feature-key combined_features \
+    --prcc-ce-weight 0.2 \
+    --prcc-ce-final-weight 0 \
+    --prcc-ce-ramp-epochs 8 \
+    --cross-clothes-contrastive-weight 0.3 \
+    --contrastive-temperature 0.07 \
+    --prcc-dev-identities "$PRCC_DEV_IDENTITIES" \
+    --prcc-dev-seed "$PRCC_DEV_SEED" \
+    --best-metric mAP \
+    --best-dataset prcc_dev \
+    --best-variant standard \
+    --eval-period 2 \
+    --lr-milestones 20,40,50 \
+    --freeze-backbone-epochs 60 \
+    --freeze-backbone-layers stem,layer1,layer2 \
+    --color-jitter-probability 0.5 \
+    --random-grayscale-probability 0.3 \
+    --dark-augment-probability 0.05 \
+    --occlusion-augment-probability 0.1 \
+    --pretrained-checkpoint "$EXP3/best.pth" \
+    --output-dir "$EXP4_JOINT_V1"
+}
+
 run_stage 1 train_model \
   --mode market \
   --epochs 120 \
@@ -242,6 +297,15 @@ run_stage 3 train_model \
   --output-dir "$EXP3"
 run_stage 3 evaluate_market "$EXP3/best.pth" combined_features
 
+if [[ "$TRAIN_EXPT4_JOINT_V1" == "1" ]]; then
+  run_stage 4 train_expt4_joint_v1
+fi
+if [[ "$EVAL_EXPT4_JOINT_V1" == "1" ]]; then
+  run_stage 4 evaluate_prcc_dev "$EXP4_JOINT_V1/best.pth" combined_features
+  run_stage 4 evaluate_market "$EXP4_JOINT_V1/best.pth" combined_features
+  run_stage 4 evaluate_prcc "$EXP4_JOINT_V1/best.pth" combined_features
+fi
+
 if [[ "$RUN_EXPT4_DEV_ABLATIONS" == "1" ]]; then
   if [[ "$TRAIN_EXPT4_DEV_CONTROL" == "1" ]]; then
     run_stage 4 train_expt4_dev_control
@@ -261,7 +325,7 @@ if [[ "$RUN_EXPT4_DEV_ABLATIONS" == "1" ]]; then
   if [[ "$EVAL_EXPT4_DEV_OBJECTIVE_SHIFT" == "1" ]]; then
     run_stage 4 evaluate_prcc_dev "$EXP4_DEV_OBJECTIVE_SHIFT/best.pth" combined_features
   fi
-else
+elif [[ "$TRAIN_EXPT4_JOINT_V1" != "1" && "$EVAL_EXPT4_JOINT_V1" != "1" ]]; then
   run_stage 4 train_expt4 "$EXP4" 0.05 0.02
   run_stage 4 evaluate_market "$EXP4/best.pth" combined_features
   run_stage 4 evaluate_prcc "$EXP4/best.pth" combined_features
