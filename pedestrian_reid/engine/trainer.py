@@ -1050,13 +1050,22 @@ def _classification_losses(outputs, labels: torch.Tensor, sources, prcc_weight: 
     market_logits = outputs["logits"].float()
     prcc_logits = outputs["prcc_logits"].float() if "prcc_logits" in outputs else market_logits
     market_loss = _masked_cross_entropy(market_logits, labels, ~prcc_mask, device)
-    if "prcc_logits" in outputs and num_market_classes > 0:
-        prcc_labels = labels - num_market_classes
-        prcc_loss = _masked_cross_entropy(prcc_logits, prcc_labels, prcc_mask, device)
-    else:
-        prcc_loss = _masked_cross_entropy(prcc_logits, labels, prcc_mask, device)
+    prcc_labels = _prcc_local_labels(labels, prcc_mask, num_market_classes) if "prcc_logits" in outputs else labels
+    prcc_loss = _masked_cross_entropy(prcc_logits, prcc_labels, prcc_mask, device)
     total = market_loss + prcc_weight * prcc_loss
     return ClassificationLosses(total, market_loss, prcc_loss)
+
+
+def _prcc_local_labels(labels: torch.Tensor, prcc_mask: torch.Tensor, num_market_classes: int) -> torch.Tensor:
+    if num_market_classes <= 0:
+        return labels
+    has_market = (~prcc_mask).any().item()
+    has_prcc = prcc_mask.any().item()
+    if not (has_market and has_prcc):
+        return labels
+    local = labels.clone()
+    local[prcc_mask] = labels[prcc_mask] - num_market_classes
+    return local
 
 
 def _masked_cross_entropy(logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor, device) -> torch.Tensor:
@@ -1124,13 +1133,16 @@ def _sketch_identity_loss(sketch_outputs, sketch_labels: torch.Tensor | None, de
         return _zero_loss(device)
     if "prcc_logits" in sketch_outputs and args.num_market_classes > 0:
         sketch_logits = sketch_outputs["prcc_logits"].float()
-        local_labels = sketch_labels - args.num_market_classes
+        if sketch_labels.min() >= args.num_market_classes:
+            local_labels = sketch_labels - args.num_market_classes
+        else:
+            local_labels = sketch_labels
     else:
         sketch_logits = sketch_outputs["logits"].float()
         local_labels = sketch_labels
     sketch_ce = F.cross_entropy(sketch_logits, local_labels)
     sketch_features = _training_feature_output(sketch_outputs, args.triplet_feature_key).float()
-    sketch_triplet = _optional_triplet(sketch_features, sketch_labels, args.triplet_margin)
+    sketch_triplet = _optional_triplet(sketch_features, local_labels, args.triplet_margin)
     return sketch_ce + args.triplet_weight * sketch_triplet
 
 
@@ -1316,7 +1328,6 @@ def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset,
     eval_metrics = evaluate_enabled_datasets(eval_model, device, args)
     selected_metric = primary_eval_metric(eval_metrics, args.best_metric, args.best_variant, args.best_dataset)
     output_dir = Path(args.output_dir)
-    best_metric_value = max(best, selected_metric)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
     _write_tensorboard_eval_metrics(tensorboard, epoch, eval_metrics, selected_metric, args)
     _mlflow_log_eval_metrics(epoch, eval_metrics, DistributedContext())
@@ -1327,7 +1338,7 @@ def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset,
         scaler=scaler,
         epoch=epoch,
         metric_name=args.best_metric,
-        metric_value=best_metric_value,
+        metric_value=selected_metric,
         dataset=dataset,
         variant=args.best_variant,
         best_dataset=args.best_dataset,
