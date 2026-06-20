@@ -122,6 +122,7 @@ def _mlflow_require_available(args: Namespace) -> None:
 def _mlflow_start_run(args: Namespace, distributed: DistributedContext):
     if not _mlflow_enabled(args) or not distributed.is_main:
         return nullcontext()
+    os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
     tracking_uri = getattr(args, "mlflow_tracking_uri", "")
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
