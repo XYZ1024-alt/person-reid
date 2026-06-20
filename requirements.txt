@@ -6,3 +6,4 @@ ultralytics
 tqdm
 matplotlib
 tensorboard
+mlflow

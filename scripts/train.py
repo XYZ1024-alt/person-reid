@@ -69,6 +69,9 @@ DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT = 0.0
 DEFAULT_CONTRASTIVE_TEMPERATURE = 0.07
 DEFAULT_TENSORBOARD = True
 DEFAULT_TENSORBOARD_DIR = ""
+DEFAULT_USE_MLFLOW = False
+DEFAULT_MLFLOW_EXPERIMENT = "pedestrian_reid"
+DEFAULT_MLFLOW_TRACKING_URI = "file:./outputs/mlruns"
 DEFAULT_LR_MILESTONES = "40,70,100"
 DEFAULT_LR_GAMMA = 0.1
 DEFAULT_FLIP_PROBABILITY = 0.5
@@ -140,6 +143,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--contrastive-temperature", type=float, default=DEFAULT_CONTRASTIVE_TEMPERATURE)
     parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=DEFAULT_TENSORBOARD)
     parser.add_argument("--tensorboard-dir", default=DEFAULT_TENSORBOARD_DIR)
+    parser.add_argument("--use-mlflow", action="store_true", default=DEFAULT_USE_MLFLOW)
+    parser.add_argument("--mlflow-experiment", default=DEFAULT_MLFLOW_EXPERIMENT)
+    parser.add_argument("--mlflow-run-name", default="")
+    parser.add_argument("--mlflow-tracking-uri", default=DEFAULT_MLFLOW_TRACKING_URI)
     parser.add_argument("--lr-milestones", default=DEFAULT_LR_MILESTONES)
     parser.add_argument("--lr-gamma", type=float, default=DEFAULT_LR_GAMMA)
     parser.add_argument("--eval-period", type=int, default=DEFAULT_EVAL_PERIOD)

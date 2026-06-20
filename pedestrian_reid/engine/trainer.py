@@ -25,6 +25,15 @@ from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY
 from pedestrian_reid.modules.model import PedestrianReIDNet, load_imagenet_pretrained_backbone
 
 
+try:
+    import mlflow
+
+    _MLFLOW_AVAILABLE = True
+except ImportError:
+    _MLFLOW_AVAILABLE = False
+    mlflow = None
+
+
 CHECKPOINT_LAST = "last.pth"
 CHECKPOINT_BEST = "best.pth"
 RUN_CONFIG_JSON = "run_config.json"
@@ -94,6 +103,133 @@ AUGMENT_PROBABILITY_ARGS = (
     "dark_augment_probability",
     "occlusion_augment_probability",
 )
+
+MLFLOW_ARTIFACT_LOG_INTERVAL = 5
+
+
+def _mlflow_enabled(args: Namespace) -> bool:
+    return bool(getattr(args, "use_mlflow", False)) and _MLFLOW_AVAILABLE
+
+
+def _mlflow_require_available(args: Namespace) -> None:
+    if not bool(getattr(args, "use_mlflow", False)):
+        return
+    if not _MLFLOW_AVAILABLE:
+        raise RuntimeError("--use-mlflow requires mlflow; install requirements.txt")
+
+
+def _mlflow_start_run(args: Namespace, distributed: DistributedContext):
+    if not _mlflow_enabled(args) or not distributed.is_main:
+        return nullcontext()
+    tracking_uri = getattr(args, "mlflow_tracking_uri", "")
+    if tracking_uri:
+        mlflow.set_tracking_uri(tracking_uri)
+    experiment = mlflow.set_experiment(getattr(args, "mlflow_experiment", "pedestrian_reid"))
+    run_name = getattr(args, "mlflow_run_name", "") or None
+    return mlflow.start_run(run_name=run_name, nested=False)
+
+
+def _mlflow_log_params(args: Namespace, dataset, loader, distributed: DistributedContext) -> None:
+    if not _mlflow_enabled(args) or not distributed.is_main:
+        return
+    params = {key: value for key, value in vars(args).items() if _is_mlflow_scalar(value)}
+    mlflow.log_params(params)
+    mlflow.set_tag("git_commit", _git_commit())
+    mlflow.set_tag("git_dirty", str(_git_is_dirty()))
+    mlflow.set_tag("world_size", distributed.world_size)
+    mlflow.set_tag("num_classes", dataset.num_classes)
+    mlflow.set_tag("num_clothes_classes", dataset.num_clothes_classes)
+    mlflow.set_tag("batches_per_epoch", len(loader))
+    _mlflow_log_source_artifacts()
+
+
+def _is_mlflow_scalar(value) -> bool:
+    return isinstance(value, (str, int, float, bool)) and value is not None
+
+
+def _git_commit() -> str:
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _git_is_dirty() -> bool:
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return bool(result.stdout.strip()) if result.returncode == 0 else False
+    except Exception:
+        return False
+
+
+def _mlflow_log_train_metrics(epoch: int, metrics: dict[str, float], distributed: DistributedContext) -> None:
+    if not _MLFLOW_AVAILABLE or not distributed.is_main:
+        return
+    step = epoch + 1
+    for name, value in metrics.items():
+        mlflow.log_metric(f"train/{name}", float(value), step=step)
+
+
+def _mlflow_log_eval_metrics(epoch: int, eval_results, distributed: DistributedContext) -> None:
+    if not _MLFLOW_AVAILABLE or not distributed.is_main:
+        return
+    step = epoch + 1
+    for job, metrics_by_variant in eval_results:
+        for variant, metrics in metrics_by_variant.items():
+            for name, value in metrics.items():
+                mlflow.log_metric(f"eval/{job.name}/{variant}/{name}", float(value), step=step)
+
+
+def _mlflow_log_artifacts(output_dir: Path, epoch: int, distributed: DistributedContext) -> None:
+    if not _MLFLOW_AVAILABLE or not distributed.is_main:
+        return
+    if (epoch + 1) % MLFLOW_ARTIFACT_LOG_INTERVAL != 0:
+        return
+    for filename in (RUN_CONFIG_JSON, TRAIN_METRICS_CSV, EVAL_METRICS_CSV):
+        path = output_dir / filename
+        if path.exists():
+            mlflow.log_artifact(str(path))
+
+
+def _mlflow_log_best_model(best_path: Path) -> None:
+    if not _MLFLOW_AVAILABLE:
+        return
+    if mlflow.active_run() is None:
+        return
+    try:
+        mlflow.log_artifact(str(best_path), artifact_path="checkpoints")
+    except Exception:
+        pass
+
+
+def _mlflow_log_source_artifacts() -> None:
+    if not _MLFLOW_AVAILABLE:
+        return
+    if mlflow.active_run() is None:
+        return
+    source_dirs = ["pedestrian_reid", "scripts"]
+    for directory in source_dirs:
+        path = Path(directory)
+        if path.exists() and path.is_dir():
+            try:
+                mlflow.log_artifacts(str(path), artifact_path=f"code/{directory}")
+            except Exception:
+                pass
 
 
 @dataclass(frozen=True)
@@ -185,6 +321,7 @@ class LossComponents:
 def train_from_args(args: Namespace) -> None:
     distributed = initialize_distributed(args)
     try:
+        _mlflow_require_available(args)
         set_seed(args.seed + distributed.rank)
         validate_training_args(args, distributed)
         device = training_device(args, distributed)
@@ -200,22 +337,24 @@ def train_from_args(args: Namespace) -> None:
         scaler = _build_grad_scaler(args, device)
         resume_state = load_checkpoint(args.resume, CheckpointTarget(model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler))
         model = configure_parallel_model(model, args, device, distributed)
-        run_training(
-            TrainingRun(
-                model=model,
-                teacher=teacher,
-                loader=loader,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                resume_state=resume_state,
-                dataset=dataset,
-                device=device,
-                args=args,
-                distributed=distributed,
-                pretrained_count=pretrained_count,
+        with _mlflow_start_run(args, distributed):
+            _mlflow_log_params(args, dataset, loader, distributed)
+            run_training(
+                TrainingRun(
+                    model=model,
+                    teacher=teacher,
+                    loader=loader,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    resume_state=resume_state,
+                    dataset=dataset,
+                    device=device,
+                    args=args,
+                    distributed=distributed,
+                    pretrained_count=pretrained_count,
+                )
             )
-        )
     finally:
         cleanup_distributed(distributed)
 
@@ -758,6 +897,7 @@ def run_training(run: TrainingRun) -> None:
                 _print_epoch(epoch, metrics)
                 _write_train_metrics(output_dir, epoch, metrics)
                 _write_tensorboard_train_metrics(tensorboard, epoch, metrics, run.scheduler)
+                _mlflow_log_train_metrics(epoch, metrics, run.distributed)
             run.scheduler.step()
             if (epoch + 1) % run.args.eval_period == 0 or epoch + 1 == run.args.epochs:
                 best_metric_value = _evaluate_epoch(
@@ -773,6 +913,7 @@ def run_training(run: TrainingRun) -> None:
                     run.distributed,
                     tensorboard,
                 )
+                _mlflow_log_artifacts(output_dir, epoch, run.distributed)
 
 
 def _initialize_training_outputs(run: TrainingRun, output_dir: Path, start_epoch: int, tensorboard) -> None:
@@ -1113,6 +1254,7 @@ def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset,
     best_metric_value = max(best, selected_metric)
     _write_eval_metrics(output_dir, epoch, eval_metrics)
     _write_tensorboard_eval_metrics(tensorboard, epoch, eval_metrics, selected_metric, args)
+    _mlflow_log_eval_metrics(epoch, eval_metrics, DistributedContext())
     request = CheckpointSaveRequest(
         model=eval_model,
         optimizer=optimizer,
@@ -1129,6 +1271,7 @@ def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset,
     if selected_metric <= best:
         return best
     save_checkpoint(output_dir / CHECKPOINT_BEST, replace(request, metric_value=selected_metric))
+    _mlflow_log_best_model(output_dir / CHECKPOINT_BEST)
     print(f"new_best {args.best_dataset}/{args.best_variant}/{args.best_metric}={selected_metric:.4f}")
     return selected_metric
 

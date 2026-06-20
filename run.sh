@@ -20,6 +20,9 @@ PRCC_DEV_IDENTITIES="${PRCC_DEV_IDENTITIES:-30}"
 PRCC_DEV_SEED="${PRCC_DEV_SEED:-42}"
 TORCHRUN="${TORCHRUN:-torchrun}"
 PYTHON="${PYTHON:-python}"
+USE_MLFLOW="${USE_MLFLOW:-0}"
+MLFLOW_EXPERIMENT="${MLFLOW_EXPERIMENT:-pedestrian_reid}"
+MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:./outputs/mlruns}"
 
 if [[ -z "${OMP_NUM_THREADS:-}" || ! "${OMP_NUM_THREADS}" =~ ^[0-9]+$ || "${OMP_NUM_THREADS}" -lt 1 ]]; then
   echo "set OMP_NUM_THREADS=1 (was '${OMP_NUM_THREADS:-unset}')"
@@ -87,11 +90,22 @@ evaluate_prcc_dev() {
 }
 
 train_model() {
+  local mlflow_args=()
+  if [[ "$USE_MLFLOW" == "1" ]]; then
+    mlflow_args=(
+      --use-mlflow
+      --mlflow-experiment "$MLFLOW_EXPERIMENT"
+      --mlflow-tracking-uri "$MLFLOW_TRACKING_URI"
+    )
+    if [[ -n "${MLFLOW_RUN_NAME:-}" ]]; then
+      mlflow_args+=(--mlflow-run-name "$MLFLOW_RUN_NAME")
+    fi
+  fi
   if (( GPUS > 1 )); then
-    "$TORCHRUN" --nproc_per_node="$GPUS" -m scripts.train --distributed "$@"
+    "$TORCHRUN" --nproc_per_node="$GPUS" -m scripts.train --distributed "${mlflow_args[@]}" "$@"
     return
   fi
-  "$PYTHON" -m scripts.train "$@"
+  "$PYTHON" -m scripts.train "${mlflow_args[@]}" "$@"
 }
 
 train_expt4() {
