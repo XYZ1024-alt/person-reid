@@ -274,7 +274,7 @@ def _identity_classifier(embedding_dim: int, num_classes: int) -> nn.Linear | No
 def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int) -> PartFeatureBranch | None:
     if not use_part_branch:
         return None
-    return PartFeatureBranch(num_parts, embedding_dim)
+    return PartFeatureBranch(num_parts, part_embedding_dim)
 
 
 def _combined_features(
