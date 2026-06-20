@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
-from pedestrian_reid.builders import MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV, build_train_loader, build_training_dataset
+from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV, build_train_loader, build_training_dataset
 from pedestrian_reid.builders import selected_prcc_dev_pids
 from pedestrian_reid.data.datasets import PRCC_SOURCE, UNKNOWN_CLOTHES
 from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, load_model, primary_eval_metric
