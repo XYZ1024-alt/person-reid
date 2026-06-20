@@ -44,6 +44,8 @@ class ReIDDataset(Dataset):
         self.transform = transform
         self.num_classes = len({sample.label for sample in samples if not sample.is_junk})
         self.num_clothes_classes = len({sample.clothes_id for sample in samples if sample.clothes_id != UNKNOWN_CLOTHES})
+        self.num_market_classes = len({sample.label for sample in samples if not sample.is_junk and sample.source == MARKET_SOURCE})
+        self.num_prcc_classes = len({sample.label for sample in samples if not sample.is_junk and sample.source == PRCC_SOURCE})
 
     def __len__(self) -> int:
         return len(self.samples)

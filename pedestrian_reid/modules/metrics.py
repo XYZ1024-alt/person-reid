@@ -12,6 +12,7 @@ PROTOCOL_CLOTH_CHANGE = "cloth_change"
 REID_FEATURE_KEY = "bn_features"
 COMBINED_FEATURE_KEY = "combined_features"
 FEATURE_KEYS = {"features", "bn_features", COMBINED_FEATURE_KEY}
+FUSION_DELIMITER = ","
 
 
 @dataclass(frozen=True)
@@ -25,19 +26,38 @@ class FeatureBank:
 
 
 def extract_feature_bank(model, loader, device: torch.device, feature_key: str = REID_FEATURE_KEY) -> FeatureBank:
-    _validate_feature_key(feature_key)
+    fusion = _parse_fusion(feature_key)
     model.eval()
     features, pids, camids, clothes_ids, is_junk, paths = [], [], [], [], [], []
     with torch.no_grad():
         for batch in loader:
             outputs = model(batch["image"].to(device))
-            features.append(_feature_output(outputs, feature_key).cpu())
+            if fusion is None:
+                features.append(_feature_output(outputs, feature_key).cpu())
+            else:
+                features.append(_fuse_features(outputs, fusion).cpu())
             pids.append(batch["pid"])
             camids.append(batch["camid"])
             clothes_ids.append(batch["clothes_id"])
             is_junk.append(batch["is_junk"])
             paths.extend(batch["path"])
     return FeatureBank(*_cat_bank(features, pids, camids, clothes_ids, is_junk), paths)
+
+
+def _parse_fusion(feature_key: str):
+    if FUSION_DELIMITER not in feature_key:
+        _validate_feature_key(feature_key)
+        return None
+    keys = [key.strip() for key in feature_key.split(FUSION_DELIMITER)]
+    for key in keys:
+        _validate_feature_key(key)
+    return keys
+
+
+def _fuse_features(outputs: dict[str, torch.Tensor], keys: list[str]) -> torch.Tensor:
+    parts = [_feature_output(outputs, key) for key in keys]
+    fused = torch.cat(parts, dim=1)
+    return F.normalize(fused, dim=1)
 
 
 def evaluate_reid(query: FeatureBank, gallery: FeatureBank, protocol: str = PROTOCOL_STANDARD) -> dict[str, float]:

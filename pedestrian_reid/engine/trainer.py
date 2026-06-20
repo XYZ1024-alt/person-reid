@@ -21,7 +21,7 @@ from pedestrian_reid.data.datasets import PRCC_SOURCE, UNKNOWN_CLOTHES
 from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, load_model, primary_eval_metric
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.losses import batch_hard_triplet_loss
-from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY
+from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY, FEATURE_KEYS
 from pedestrian_reid.modules.model import PedestrianReIDNet, load_imagenet_pretrained_backbone
 
 
@@ -55,6 +55,7 @@ TRAIN_METRIC_FIELDS = [
     "cloth_invariant",
     "cross_clothes_contrastive",
     "valid_cross_clothes_pairs",
+    "domain",
     "effective_cal_weight",
     "effective_prcc_ce_weight",
     "effective_sketch_consistency_weight",
@@ -311,6 +312,7 @@ class LossComponents:
     sketch: torch.Tensor
     consistency: torch.Tensor
     distill: torch.Tensor
+    domain: torch.Tensor
     auxiliary: AuxiliaryLosses
     effective_cal_weight: float
     effective_prcc_ce_weight: float
@@ -327,6 +329,8 @@ def train_from_args(args: Namespace) -> None:
         device = training_device(args, distributed)
         dataset = build_training_dataset(args)
         validate_training_dataset(dataset, args)
+        args.num_market_classes = dataset.num_market_classes
+        args.num_prcc_classes = dataset.num_prcc_classes
         loader = build_train_loader(dataset, args, distributed)
         _require_cal_labels(dataset.num_clothes_classes, args.cal_weight)
         model = build_model(dataset, args).to(device)
@@ -384,6 +388,10 @@ def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
         part_embedding_dim=args.part_embedding_dim,
         combined_global_weight=args.combined_global_weight,
         combined_part_weight=args.combined_part_weight,
+        use_dual_classifier=getattr(args, "use_dual_classifier", False),
+        num_market_classes=dataset.num_market_classes,
+        num_prcc_classes=dataset.num_prcc_classes,
+        use_domain_adversarial=getattr(args, "use_domain_adversarial", False),
     )
 
 
@@ -444,7 +452,7 @@ def _count_head_parameters(source: dict[str, torch.Tensor]) -> int:
 
 
 def _is_head_key(key: str) -> bool:
-    return key.startswith(("classifier.", "clothes_classifier."))
+    return key.startswith(("classifier.", "prcc_classifier.", "clothes_classifier.", "domain_discriminator."))
 
 
 def _print_skipped_pretrained_parameters(distributed: DistributedContext, skipped: list[str]) -> None:
@@ -559,7 +567,13 @@ def ddp_find_unused_parameters(args: Namespace) -> bool:
 
 
 def _needs_ddp_unused_parameter_detection(args: Namespace) -> bool:
-    return _cal_has_inactive_epochs(args) or _sketch_path_is_conditional(args) or _backbone_freeze_is_active(args)
+    return (
+        _cal_has_inactive_epochs(args)
+        or _sketch_path_is_conditional(args)
+        or _backbone_freeze_is_active(args)
+        or getattr(args, "use_dual_classifier", False)
+        or getattr(args, "domain_adversarial_weight", 0.0) > 0.0
+    )
 
 
 def _cal_has_inactive_epochs(args: Namespace) -> bool:
@@ -745,6 +759,8 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
     _validate_objective_shift_args(args)
     _validate_distill_args(args)
     _validate_feature_key_args(args)
+    _validate_dual_classifier_args(args)
+    _validate_domain_adversarial_args(args)
     if args.sketch_warmup_epochs < 0:
         raise ValueError("sketch_warmup_epochs must be >= 0")
     if args.sketch_ramp_epochs < 0:
@@ -793,10 +809,32 @@ def _validate_objective_shift_args(args: Namespace) -> None:
 
 
 def _validate_feature_key_args(args: Namespace) -> None:
-    if args.feature_key == COMBINED_FEATURE_KEY and not args.use_part_branch:
-        raise ValueError("combined_features requires --use-part-branch")
-    if args.triplet_feature_key == COMBINED_FEATURE_KEY and not args.use_part_branch:
-        raise ValueError("triplet_feature_key=combined_features requires --use-part-branch")
+    _validate_feature_key_string(args.feature_key, args.use_part_branch, "feature_key")
+    _validate_feature_key_string(args.triplet_feature_key, args.use_part_branch, "triplet_feature_key")
+
+
+def _validate_feature_key_string(feature_key: str, use_part_branch: bool, name: str) -> None:
+    keys = [key.strip() for key in feature_key.split(",")]
+    for key in keys:
+        if key not in FEATURE_KEYS:
+            raise ValueError(f"{name} must be one of {sorted(FEATURE_KEYS)}, got {key}")
+    if COMBINED_FEATURE_KEY in keys and not use_part_branch:
+        raise ValueError(f"{name} includes combined_features which requires --use-part-branch")
+
+
+def _validate_dual_classifier_args(args: Namespace) -> None:
+    if not getattr(args, "use_dual_classifier", False):
+        return
+    if args.mode != MODE_JOINT:
+        raise ValueError("--use-dual-classifier requires joint mode")
+
+
+def _validate_domain_adversarial_args(args: Namespace) -> None:
+    weight = getattr(args, "domain_adversarial_weight", 0.0)
+    if weight < 0:
+        raise ValueError("domain_adversarial_weight must be >= 0")
+    if weight > 0 and args.mode not in {MODE_JOINT, MODE_PRCC}:
+        raise ValueError("domain_adversarial_weight requires joint or prcc mode")
 
 
 def _validate_best_dataset_args(args: Namespace) -> None:
@@ -946,11 +984,11 @@ def _train_batch(
     has_sketch = batch["has_sketch"].bool()
     sketch_context = _build_sketch_context(model, batch, labels, has_sketch, device, args, effective_consistency_weight)
     outputs, sketch_outputs = _forward_training_paths(model, images, sketch_context, device, args)
-    _validate_batch_targets(labels, outputs["logits"].size(1), "identity label")
+    _validate_batch_targets(labels, _total_identity_classes(outputs), "identity label")
     _validate_batch_clothes_targets(clothes_labels, outputs, effective_cal_weight)
     labels = labels.to(device, non_blocking=args.pin_memory)
     clothes_labels = clothes_labels.to(device, non_blocking=args.pin_memory)
-    classification = _classification_losses(outputs, labels, sources, effective_prcc_ce_weight, device)
+    classification = _classification_losses(outputs, labels, sources, effective_prcc_ce_weight, device, args.num_market_classes)
     triplet_features = _training_feature_output(outputs, args.triplet_feature_key).float()
     triplet = batch_hard_triplet_loss(triplet_features, labels, args.triplet_margin)
     cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
@@ -964,6 +1002,7 @@ def _train_batch(
         distill_weight=effective_distill_weight,
     )
     auxiliary = _auxiliary_losses(outputs, labels, clothes_labels, sources, args, device)
+    domain_loss = _domain_adversarial_loss(outputs, sources, args, device)
     components = LossComponents(
         classification=classification,
         triplet=triplet,
@@ -971,6 +1010,7 @@ def _train_batch(
         sketch=sketch_loss,
         consistency=consistency_loss,
         distill=distill_loss,
+        domain=domain_loss,
         auxiliary=auxiliary,
         effective_cal_weight=effective_cal_weight,
         effective_prcc_ce_weight=effective_prcc_ce_weight,
@@ -1000,13 +1040,20 @@ def _batch_loss_metrics(loss: torch.Tensor, components: LossComponents) -> dict[
         "cloth_invariant": components.auxiliary.cloth_invariant,
         "cross_clothes_contrastive": components.auxiliary.cross_clothes_contrastive,
         "valid_cross_clothes_pairs": components.auxiliary.valid_cross_clothes_pairs,
+        "domain": components.domain,
     }
 
 
-def _classification_losses(outputs, labels: torch.Tensor, sources, prcc_weight: float, device) -> ClassificationLosses:
+def _classification_losses(outputs, labels: torch.Tensor, sources, prcc_weight: float, device, num_market_classes: int = 0) -> ClassificationLosses:
     prcc_mask = _source_mask(sources, device)
-    market_loss = _masked_cross_entropy(outputs["logits"].float(), labels, ~prcc_mask, device)
-    prcc_loss = _masked_cross_entropy(outputs["logits"].float(), labels, prcc_mask, device)
+    market_logits = outputs["logits"].float()
+    prcc_logits = outputs["prcc_logits"].float() if "prcc_logits" in outputs else market_logits
+    market_loss = _masked_cross_entropy(market_logits, labels, ~prcc_mask, device)
+    if "prcc_logits" in outputs and num_market_classes > 0:
+        prcc_labels = labels - num_market_classes
+        prcc_loss = _masked_cross_entropy(prcc_logits, prcc_labels, prcc_mask, device)
+    else:
+        prcc_loss = _masked_cross_entropy(prcc_logits, labels, prcc_mask, device)
     total = market_loss + prcc_weight * prcc_loss
     return ClassificationLosses(total, market_loss, prcc_loss)
 
@@ -1074,7 +1121,13 @@ def _use_sketch_path(args: Namespace, has_sketch: torch.Tensor, consistency_weig
 def _sketch_identity_loss(sketch_outputs, sketch_labels: torch.Tensor | None, device, args) -> torch.Tensor:
     if args.sketch_loss_weight <= NO_SKETCH_LOSS:
         return _zero_loss(device)
-    sketch_ce = F.cross_entropy(sketch_outputs["logits"].float(), sketch_labels)
+    if "prcc_logits" in sketch_outputs and args.num_market_classes > 0:
+        sketch_logits = sketch_outputs["prcc_logits"].float()
+        local_labels = sketch_labels - args.num_market_classes
+    else:
+        sketch_logits = sketch_outputs["logits"].float()
+        local_labels = sketch_labels
+    sketch_ce = F.cross_entropy(sketch_logits, local_labels)
     sketch_features = _training_feature_output(sketch_outputs, args.triplet_feature_key).float()
     sketch_triplet = _optional_triplet(sketch_features, sketch_labels, args.triplet_margin)
     return sketch_ce + args.triplet_weight * sketch_triplet
@@ -1216,6 +1269,16 @@ def _source_mask(sources, device) -> torch.Tensor:
     return torch.tensor([source == PRCC_SOURCE for source in sources], dtype=torch.bool, device=device)
 
 
+def _domain_adversarial_loss(outputs, sources, args: Namespace, device: torch.device) -> torch.Tensor:
+    if "domain_logits" not in outputs:
+        return _zero_loss(device)
+    weight = getattr(args, "domain_adversarial_weight", 0.0)
+    if weight <= 0.0:
+        return _zero_loss(device)
+    domain_labels = _source_mask(sources, device).long()
+    return F.cross_entropy(outputs["domain_logits"].float(), domain_labels)
+
+
 def _pairwise_cosine(features: torch.Tensor) -> torch.Tensor:
     normalized = F.normalize(features, dim=1)
     return normalized @ normalized.t()
@@ -1243,7 +1306,8 @@ def _total_loss(args, components: LossComponents):
     loss = loss + components.distill_weight * components.distill
     loss = loss + args.part_triplet_weight * components.auxiliary.part_triplet
     loss = loss + args.cloth_invariant_weight * components.auxiliary.cloth_invariant
-    return loss + args.cross_clothes_contrastive_weight * components.auxiliary.cross_clothes_contrastive
+    loss = loss + args.cross_clothes_contrastive_weight * components.auxiliary.cross_clothes_contrastive
+    return loss + getattr(args, "domain_adversarial_weight", 0.0) * components.domain
 
 
 def _evaluate_and_save(model, optimizer, scheduler, scaler, epoch: int, dataset, best: float, device, args, tensorboard) -> float:
@@ -1308,6 +1372,7 @@ def _empty_epoch_totals() -> dict[str, float]:
         "cloth_invariant": 0.0,
         "cross_clothes_contrastive": 0.0,
         "valid_cross_clothes_pairs": 0.0,
+        "domain": 0.0,
     }
 
 
@@ -1416,6 +1481,8 @@ def _dataset_summary(dataset) -> dict:
         "samples": len(dataset.samples),
         "valid_samples": len(valid_samples),
         "identities": dataset.num_classes,
+        "market_identities": dataset.num_market_classes,
+        "prcc_identities": dataset.num_prcc_classes,
         "clothes_classes": dataset.num_clothes_classes,
         "source_samples": _count_by_source(valid_samples),
         "source_identities": _count_identities_by_source(valid_samples),
@@ -1573,6 +1640,7 @@ def _batch_metrics(
         "cloth": f"{losses['cloth_invariant'].item():.4f}",
         "xcloth": f"{losses['cross_clothes_contrastive'].item():.4f}",
         "pairs": f"{losses['valid_cross_clothes_pairs'].item():.0f}",
+        "dom": f"{losses['domain'].item():.4f}",
         "cal_w": f"{cal_weight:.4f}",
         "prcc_ce_w": f"{prcc_ce_weight:.4f}",
         "con_w": f"{consistency_weight:.4f}",
@@ -1598,6 +1666,8 @@ def _checkpoint_metadata(request: CheckpointSaveRequest) -> dict[str, int | floa
         "best_metric_value": request.metric_value,
         "num_classes": request.dataset.num_classes,
         "num_clothes_classes": request.dataset.num_clothes_classes,
+        "num_market_classes": request.dataset.num_market_classes,
+        "num_prcc_classes": request.dataset.num_prcc_classes,
     }
 
 
@@ -1609,6 +1679,8 @@ def _model_config(model) -> dict[str, int | float | bool]:
         "part_embedding_dim": int(model.part_embedding_dim),
         "combined_global_weight": float(model.combined_global_weight),
         "combined_part_weight": float(model.combined_part_weight),
+        "use_dual_classifier": bool(getattr(model, "use_dual_classifier", False)),
+        "use_domain_adversarial": bool(getattr(model, "use_domain_adversarial", False)),
     }
 
 
@@ -1622,6 +1694,7 @@ def _print_epoch(epoch: int, metrics: dict[str, float]) -> None:
         f"part={metrics['part_triplet']:.4f} cloth={metrics['cloth_invariant']:.4f} "
         f"xcloth={metrics['cross_clothes_contrastive']:.4f} "
         f"pairs={metrics['valid_cross_clothes_pairs']:.1f} "
+        f"domain={metrics['domain']:.4f} "
         f"cal_w={metrics['effective_cal_weight']:.4f} "
         f"prcc_ce_w={metrics['effective_prcc_ce_weight']:.4f} "
         f"con_w={metrics['effective_sketch_consistency_weight']:.4f} "
@@ -1724,6 +1797,8 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
         f"freeze_backbone_layers={args.freeze_backbone_layers}",
         f"freeze_backbone_all_epochs={args.freeze_backbone_all_epochs}",
+        f"use_dual_classifier={getattr(args, 'use_dual_classifier', False)}",
+        f"domain_adversarial_weight={getattr(args, 'domain_adversarial_weight', 0.0)}",
         f"pin_memory={args.pin_memory}",
         f"persistent_workers={_loader_has_persistent_workers(loader)}",
     ]
@@ -1786,6 +1861,13 @@ def _validate_contiguous_targets(values: list[int], class_count: int, name: str)
     actual = set(values)
     if actual != expected:
         raise ValueError(f"{name} values must be contiguous 0..{class_count - 1}; got min={min(actual)} max={max(actual)}")
+
+
+def _total_identity_classes(outputs: dict[str, torch.Tensor]) -> int:
+    total = outputs["logits"].size(1)
+    if "prcc_logits" in outputs:
+        total += outputs["prcc_logits"].size(1)
+    return total
 
 
 def _validate_batch_targets(targets: torch.Tensor, class_count: int, name: str) -> None:

@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--prcc-dev-identities", type=int, default=DEFAULT_PRCC_DEV_IDENTITIES)
     parser.add_argument("--prcc-dev-seed", type=int, default=DEFAULT_PRCC_DEV_SEED)
-    parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=REID_FEATURE_KEY)
+    parser.add_argument("--feature-key", default=REID_FEATURE_KEY)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
     args.root = args.root or default_root(args.dataset)

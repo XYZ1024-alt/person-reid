@@ -109,6 +109,10 @@ def load_model(checkpoint_path: str, device: torch.device) -> PedestrianReIDNet:
         part_embedding_dim=int(model_config.get("part_embedding_dim", PART_EMBEDDING_DIM)),
         combined_global_weight=float(model_config.get("combined_global_weight", DEFAULT_COMBINED_GLOBAL_WEIGHT)),
         combined_part_weight=float(model_config.get("combined_part_weight", DEFAULT_COMBINED_PART_WEIGHT)),
+        use_dual_classifier=bool(model_config.get("use_dual_classifier", False)),
+        num_market_classes=int(checkpoint.get("num_market_classes", 0)),
+        num_prcc_classes=int(checkpoint.get("num_prcc_classes", 0)),
+        use_domain_adversarial=bool(model_config.get("use_domain_adversarial", False)),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

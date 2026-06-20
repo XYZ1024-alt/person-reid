@@ -153,6 +153,23 @@ class PartFeatureBranch(nn.Module):
         return F.normalize(self.bnnecks[index](embedding), dim=1)
 
 
+class DomainDiscriminator(nn.Module):
+    def __init__(self, embedding_dim: int, hidden_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Linear(hidden_dim, 2),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features)
+
+
 class PedestrianReIDNet(nn.Module):
     def __init__(
         self,
@@ -165,6 +182,10 @@ class PedestrianReIDNet(nn.Module):
         part_embedding_dim: int = PART_EMBEDDING_DIM,
         combined_global_weight: float = DEFAULT_COMBINED_GLOBAL_WEIGHT,
         combined_part_weight: float = DEFAULT_COMBINED_PART_WEIGHT,
+        use_dual_classifier: bool = False,
+        num_market_classes: int = 0,
+        num_prcc_classes: int = 0,
+        use_domain_adversarial: bool = False,
     ):
         super().__init__()
         _validate_combined_weights(combined_global_weight, combined_part_weight)
@@ -174,13 +195,19 @@ class PedestrianReIDNet(nn.Module):
         self.part_embedding_dim = part_embedding_dim
         self.combined_global_weight = combined_global_weight
         self.combined_part_weight = combined_part_weight
+        self.use_dual_classifier = use_dual_classifier
+        self.num_market_classes = num_market_classes
+        self.num_prcc_classes = num_prcc_classes
+        self.use_domain_adversarial = use_domain_adversarial
         self.backbone = ResNet50IBNBackbone()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.embedding = nn.Linear(REID_FEATURE_DIM, embedding_dim, bias=False)
         self.bnneck = nn.BatchNorm1d(embedding_dim)
-        self.classifier = nn.Linear(embedding_dim, num_classes, bias=False)
+        self.classifier = _identity_classifier(embedding_dim, num_market_classes if use_dual_classifier else num_classes)
+        self.prcc_classifier = _identity_classifier(embedding_dim, num_prcc_classes) if use_dual_classifier else None
         self.clothes_classifier = _clothes_classifier(embedding_dim, num_clothes_classes)
         self.part_branch = _part_branch(use_part_branch, num_parts, part_embedding_dim)
+        self.domain_discriminator = DomainDiscriminator(embedding_dim) if use_domain_adversarial else None
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         feature_map = self.backbone(images)
@@ -188,10 +215,12 @@ class PedestrianReIDNet(nn.Module):
         embedding = self.embedding(pooled)
         bn_features = self.bnneck(embedding)
         outputs = {
-            "logits": self.classifier(bn_features),
+            "logits": self._market_logits(bn_features),
             "features": F.normalize(embedding, dim=1),
             "bn_features": F.normalize(bn_features, dim=1),
         }
+        if self.prcc_classifier is not None:
+            outputs["prcc_logits"] = self.prcc_classifier(bn_features)
         if self.part_branch is not None:
             part_features = self.part_branch(feature_map)
             outputs["part_features"] = part_features
@@ -204,7 +233,15 @@ class PedestrianReIDNet(nn.Module):
         if self.clothes_classifier is not None:
             reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
             outputs["clothes_logits"] = self.clothes_classifier(reversed_features)
+        if self.domain_discriminator is not None:
+            reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
+            outputs["domain_logits"] = self.domain_discriminator(reversed_features)
         return outputs
+
+    def _market_logits(self, bn_features: torch.Tensor) -> torch.Tensor:
+        if self.classifier is None:
+            raise RuntimeError("Model has no identity classifier")
+        return self.classifier(bn_features)
 
 
 def _conv1x1(in_channels: int, out_channels: int, stride: int = 1) -> nn.Conv2d:
@@ -228,7 +265,13 @@ def _clothes_classifier(embedding_dim: int, num_clothes_classes: int) -> nn.Line
     return nn.Linear(embedding_dim, num_clothes_classes, bias=True)
 
 
-def _part_branch(use_part_branch: bool, num_parts: int, embedding_dim: int) -> PartFeatureBranch | None:
+def _identity_classifier(embedding_dim: int, num_classes: int) -> nn.Linear | None:
+    if num_classes <= 0:
+        return None
+    return nn.Linear(embedding_dim, num_classes, bias=False)
+
+
+def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int) -> PartFeatureBranch | None:
     if not use_part_branch:
         return None
     return PartFeatureBranch(num_parts, embedding_dim)

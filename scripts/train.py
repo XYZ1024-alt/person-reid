@@ -67,6 +67,8 @@ DEFAULT_PRCC_CE_FINAL_WEIGHT = 1.0
 DEFAULT_PRCC_CE_RAMP_EPOCHS = 0
 DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT = 0.0
 DEFAULT_CONTRASTIVE_TEMPERATURE = 0.07
+DEFAULT_USE_DUAL_CLASSIFIER = False
+DEFAULT_DOMAIN_ADVERSARIAL_WEIGHT = 0.0
 DEFAULT_TENSORBOARD = True
 DEFAULT_TENSORBOARD_DIR = ""
 DEFAULT_USE_MLFLOW = False
@@ -117,8 +119,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--best-metric", choices=["rank1", "mAP"], default=DEFAULT_BEST_METRIC)
     parser.add_argument("--best-variant", choices=[VARIANT_STANDARD, VARIANT_DARK, VARIANT_OCCLUDED], default=DEFAULT_BEST_VARIANT)
     parser.add_argument("--best-dataset", choices=["auto", MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV], default=DEFAULT_BEST_DATASET)
-    parser.add_argument("--feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_FEATURE_KEY)
-    parser.add_argument("--triplet-feature-key", choices=sorted(FEATURE_KEYS), default=DEFAULT_TRIPLET_FEATURE_KEY)
+    parser.add_argument("--feature-key", default=DEFAULT_FEATURE_KEY)
+    parser.add_argument("--triplet-feature-key", default=DEFAULT_TRIPLET_FEATURE_KEY)
+    parser.add_argument("--use-dual-classifier", action="store_true", default=DEFAULT_USE_DUAL_CLASSIFIER)
+    parser.add_argument("--domain-adversarial-weight", type=float, default=DEFAULT_DOMAIN_ADVERSARIAL_WEIGHT)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
     parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
     parser.add_argument("--use-part-branch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PART_BRANCH)

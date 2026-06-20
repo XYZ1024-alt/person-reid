@@ -210,11 +210,13 @@ train_expt4_joint_v1() {
     --distill-final-weight 0 \
     --triplet-feature-key combined_features \
     --feature-key combined_features \
-    --prcc-ce-weight 0.2 \
-    --prcc-ce-final-weight 0 \
-    --prcc-ce-ramp-epochs 8 \
-    --cross-clothes-contrastive-weight 0.3 \
-    --contrastive-temperature 0.07 \
+    --use-dual-classifier \
+    --domain-adversarial-weight 0.1 \
+    --prcc-ce-weight 0.5 \
+    --prcc-ce-final-weight 0.2 \
+    --prcc-ce-ramp-epochs 10 \
+    --cross-clothes-contrastive-weight 0.2 \
+    --contrastive-temperature 0.1 \
     --prcc-dev-identities "$PRCC_DEV_IDENTITIES" \
     --prcc-dev-seed "$PRCC_DEV_SEED" \
     --best-metric mAP \
@@ -222,7 +224,7 @@ train_expt4_joint_v1() {
     --best-variant standard \
     --eval-period 2 \
     --lr-milestones 20,40,50 \
-    --freeze-backbone-epochs 60 \
+    --freeze-backbone-epochs 30 \
     --freeze-backbone-layers stem,layer1,layer2 \
     --color-jitter-probability 0.5 \
     --random-grayscale-probability 0.3 \
