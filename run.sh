@@ -358,7 +358,7 @@ run_stage 5 train_model \
   --epochs 3 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
-  --lr 0.00003 \
+  --learning-rate 1e-5 \
   --cal-weight 0 \
   --cal-warmup-epochs 0 \
   --cal-ramp-epochs 0 \
@@ -370,25 +370,29 @@ run_stage 5 train_model \
   --use-part-branch \
   --num-parts 6 \
   --part-embedding-dim 256 \
-  --part-triplet-weight 0.3 \
-  --cloth-invariant-weight 0.1 \
+  --part-triplet-weight 0.0 \
+  --cloth-invariant-weight 0.0 \
+  --cross-clothes-contrastive-weight 0.3 \
+  --cross-clothes-contrastive-margin 0.5 \
   --combined-global-weight 0.7 \
   --combined-part-weight 0.3 \
   --teacher-checkpoint "$EXP4_FOR_EXP5/best.pth" \
-  --distill-weight 0.1 \
-  --distill-final-weight 0.1 \
+  --distill-weight 0.05 \
+  --distill-final-weight 0.05 \
   --distill-hold-epochs 0 \
   --distill-ramp-epochs 0 \
-  --freeze-backbone-all-epochs \
+  --freeze-layers 'layer1,layer2,layer3' \
   --feature-key combined_features \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 1 \
-  --lr-milestones 1,2 \
+  --lr-scheduler cosine \
+  --min-lr 1e-6 \
+  --warmup-epochs 0 \
   --color-jitter-probability 0.5 \
-  --random-grayscale-probability 0.25 \
-  --dark-augment-probability 0.05 \
-  --occlusion-augment-probability 0.1 \
+  --random-grayscale-probability 0.1 \
+  --dark-augment-probability 0.0 \
+  --occlusion-augment-probability 0.05 \
   --pretrained-checkpoint "$EXP4_FOR_EXP5/best.pth" \
   --output-dir "$EXP5"
 run_stage 5 evaluate_prcc "$EXP5/best.pth" combined_features
