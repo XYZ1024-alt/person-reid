@@ -230,12 +230,12 @@ class PedestrianReIDNet(nn.Module):
                 global_weight=self.combined_global_weight,
                 part_weight=self.combined_part_weight,
             )
-        if self.clothes_classifier is not None:
+        if self.clothes_classifier is not None or self.domain_discriminator is not None:
             reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
-            outputs["clothes_logits"] = self.clothes_classifier(reversed_features)
-        if self.domain_discriminator is not None:
-            reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
-            outputs["domain_logits"] = self.domain_discriminator(reversed_features)
+            if self.clothes_classifier is not None:
+                outputs["clothes_logits"] = self.clothes_classifier(reversed_features)
+            if self.domain_discriminator is not None:
+                outputs["domain_logits"] = self.domain_discriminator(reversed_features)
         return outputs
 
     def _market_logits(self, bn_features: torch.Tensor) -> torch.Tensor:
