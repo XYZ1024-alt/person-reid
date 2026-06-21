@@ -358,7 +358,7 @@ run_stage 5 train_model \
   --epochs 3 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
-  --learning-rate 1e-5 \
+  --lr 0.00001 \
   --cal-weight 0 \
   --cal-warmup-epochs 0 \
   --cal-ramp-epochs 0 \
@@ -373,7 +373,6 @@ run_stage 5 train_model \
   --part-triplet-weight 0.0 \
   --cloth-invariant-weight 0.0 \
   --cross-clothes-contrastive-weight 0.3 \
-  --cross-clothes-contrastive-margin 0.5 \
   --combined-global-weight 0.7 \
   --combined-part-weight 0.3 \
   --teacher-checkpoint "$EXP4_FOR_EXP5/best.pth" \
@@ -381,14 +380,12 @@ run_stage 5 train_model \
   --distill-final-weight 0.05 \
   --distill-hold-epochs 0 \
   --distill-ramp-epochs 0 \
-  --freeze-layers 'layer1,layer2,layer3' \
+  --freeze-backbone-layers 'layer1,layer2,layer3' \
   --feature-key combined_features \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 1 \
-  --lr-scheduler cosine \
-  --min-lr 1e-6 \
-  --warmup-epochs 0 \
+  --lr-milestones 1,2 \
   --color-jitter-probability 0.5 \
   --random-grayscale-probability 0.1 \
   --dark-augment-probability 0.0 \
