@@ -57,6 +57,7 @@ TRAIN_METRIC_FIELDS = [
     "valid_cross_clothes_pairs",
     "domain",
     "effective_cal_weight",
+    "cal_alpha",
     "effective_prcc_ce_weight",
     "effective_sketch_consistency_weight",
     "effective_distill_weight",
@@ -738,6 +739,7 @@ def train_one_epoch(
         )
     metrics = {key: value / len(loader) for key, value in totals.items()}
     metrics["effective_cal_weight"] = effective_cal_weight
+    metrics["cal_alpha"] = effective_cal_weight  # Track alpha for gradient reversal scale
     metrics["effective_prcc_ce_weight"] = effective_prcc_ce_weight
     metrics["effective_sketch_consistency_weight"] = effective_consistency_weight
     metrics["effective_distill_weight"] = effective_distill_weight
@@ -1780,12 +1782,43 @@ def _require_cal_labels(num_clothes_classes: int, cal_weight: float) -> None:
 
 
 def _effective_cal_weight(args: Namespace, epoch: int) -> float:
+    """
+    Two-phase CAL weight scheduling with Sigmoid-shaped curriculum:
+
+    Phase 1 (Representation Stabilization): 0 <= epoch < warmup_epochs
+        - alpha = 0.0 (no adversarial gradients)
+        - Only identity loss and contrastive loss train the backbone
+        - Establishes a smooth, robust embedding manifold
+
+    Phase 2 (Fine-grained Attribute Erasure): warmup_epochs <= epoch < total_epochs
+        - alpha ramps via Sigmoid curve from 0 to target weight
+        - Formula: alpha = target_weight * ((2 / (1 + exp(-10 * progress))) - 1)
+        - Progressive gradient release prevents manifold disruption
+    """
     if args.cal_weight <= NO_CAL_LOSS or epoch < args.cal_warmup_epochs:
         return NO_CAL_LOSS
-    ramp_index = epoch - args.cal_warmup_epochs + 1
-    if args.cal_ramp_epochs == 0 or ramp_index >= args.cal_ramp_epochs:
-        return args.cal_weight
-    return args.cal_weight * ramp_index / args.cal_ramp_epochs
+
+    # Check if using Sigmoid-shaped ramp (two-phase curriculum)
+    use_sigmoid = getattr(args, 'cal_sigmoid_ramp', False)
+
+    if use_sigmoid:
+        # Phase 2: Sigmoid-shaped progressive release
+        phase2_start = args.cal_warmup_epochs
+        phase2_duration = max(args.epochs - phase2_start, 1)
+        progress = (epoch - phase2_start) / phase2_duration
+
+        # Sigmoid function: maps [0, 1] -> [0, ~1] with smooth S-curve
+        # alpha_scale = (2 / (1 + exp(-10 * progress))) - 1
+        import math
+        alpha_scale = (2.0 / (1.0 + math.exp(-10.0 * progress))) - 1.0
+
+        return args.cal_weight * alpha_scale
+    else:
+        # Legacy behavior: linear ramp (for backward compatibility)
+        ramp_index = epoch - args.cal_warmup_epochs + 1
+        if args.cal_ramp_epochs == 0 or ramp_index >= args.cal_ramp_epochs:
+            return args.cal_weight
+        return args.cal_weight * ramp_index / args.cal_ramp_epochs
 
 
 def _effective_prcc_ce_weight(args: Namespace, epoch: int) -> float:

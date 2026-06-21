@@ -67,6 +67,7 @@ DEFAULT_PRCC_CE_FINAL_WEIGHT = 1.0
 DEFAULT_PRCC_CE_RAMP_EPOCHS = 0
 DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT = 0.0
 DEFAULT_CONTRASTIVE_TEMPERATURE = 0.07
+DEFAULT_HARD_NEGATIVE_WEIGHT = 2.0
 DEFAULT_USE_DUAL_CLASSIFIER = False
 DEFAULT_DOMAIN_ADVERSARIAL_WEIGHT = 0.0
 DEFAULT_TENSORBOARD = True
@@ -109,6 +110,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cal-weight", type=float, default=DEFAULT_CAL_WEIGHT)
     parser.add_argument("--cal-warmup-epochs", type=int, default=DEFAULT_CAL_WARMUP_EPOCHS)
     parser.add_argument("--cal-ramp-epochs", type=int, default=DEFAULT_CAL_RAMP_EPOCHS)
+    parser.add_argument(
+        "--cal-sigmoid-ramp",
+        action="store_true",
+        help="Use Sigmoid-shaped ramp for CAL weight (two-phase curriculum learning). "
+             "Phase 1: alpha=0 during warmup (no adversarial gradient). "
+             "Phase 2: alpha ramps via Sigmoid curve from 0 to target weight."
+    )
     parser.add_argument("--prcc-identities-ratio", type=float, default=DEFAULT_PRCC_IDENTITIES_RATIO)
     parser.add_argument("--disable-source-balanced-sampling", action="store_true")
     parser.add_argument("--use-prcc-sketch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PRCC_SKETCH)
@@ -153,6 +161,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prcc-ce-ramp-epochs", type=int, default=DEFAULT_PRCC_CE_RAMP_EPOCHS)
     parser.add_argument("--cross-clothes-contrastive-weight", type=float, default=DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT)
     parser.add_argument("--contrastive-temperature", type=float, default=DEFAULT_CONTRASTIVE_TEMPERATURE)
+    parser.add_argument(
+        "--cross-clothes-hard-negative-weight",
+        type=float,
+        default=DEFAULT_HARD_NEGATIVE_WEIGHT,
+        help="Weight multiplier for hard negatives (different ID, same clothes) in cross-clothes contrastive loss. "
+             "Higher values more aggressively push apart people wearing similar outfits. Default: 2.0"
+    )
     parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=DEFAULT_TENSORBOARD)
     parser.add_argument("--tensorboard-dir", default=DEFAULT_TENSORBOARD_DIR)
     parser.add_argument("--use-mlflow", action="store_true", default=DEFAULT_USE_MLFLOW)

@@ -69,6 +69,100 @@ class DomainDiscriminator(nn.Module):
         return self.net(features)
 
 
+class ClothInvariantReIDHead(nn.Module):
+    """
+    Decoupled head for clothes-invariant person re-identification.
+    Fuses CLIP features with sketch topology via cross-attention.
+
+    This head mitigates gradient conflicts by:
+    1. Using cross-attention for sketch fusion (preserves CLIP manifold)
+    2. Separate branches for ReID retrieval and clothes adversarial learning
+    3. Dynamic gradient reversal scale (alpha) for curriculum learning
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = EMBEDDING_DIM,
+        num_reid_classes: int = 0,
+        num_clothes_classes: int = 0,
+        clip_dim: int = 1024,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.clip_dim = clip_dim
+
+        # Sketch fusion via cross-attention
+        # Query: CLIP features, Key/Value: sketch features
+        self.sketch_fusion = nn.MultiheadAttention(
+            embed_dim=clip_dim,
+            num_heads=4,
+            batch_first=True,
+        )
+
+        # ReID retrieval branch
+        self.embedding = nn.Linear(clip_dim, embedding_dim, bias=False)
+        self.bnneck = nn.BatchNorm1d(embedding_dim)
+        self.classifier = nn.Linear(embedding_dim, num_reid_classes, bias=False) if num_reid_classes > 0 else None
+
+        # CAL adversarial branch (operates on same features, different gradient path)
+        self.clothes_classifier = nn.Linear(embedding_dim, num_clothes_classes, bias=True) if num_clothes_classes > 0 else None
+
+    def forward(
+        self,
+        x_clip: torch.Tensor,
+        x_sketch: torch.Tensor | None = None,
+        alpha: float = 1.0,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Forward pass with optional sketch fusion and gradient reversal.
+
+        Args:
+            x_clip: [B, 1024] CLIP CLS token features
+            x_sketch: [B, 1024] sketch topology features (optional)
+            alpha: Gradient reversal scale for CAL (0.0 = no adversarial gradient)
+
+        Returns:
+            Dictionary containing:
+                - 'logits': [B, num_reid_classes] identity classification logits
+                - 'clothes_logits': [B, num_clothes_classes] clothes classification logits
+                - 'features': [B, embedding_dim] L2-normalized raw features
+                - 'bn_features': [B, embedding_dim] L2-normalized BN features
+        """
+        # Sketch fusion via cross-attention (if provided)
+        if x_sketch is not None:
+            # Add sequence dimension: [B, D] -> [B, 1, D]
+            q = x_clip.unsqueeze(1)  # Query: CLIP features
+            k = v = x_sketch.unsqueeze(1)  # Key/Value: sketch features
+
+            # Cross-attention: inject structural geometry
+            attn_out, _ = self.sketch_fusion(q, k, v)
+
+            # Residual connection: preserve CLIP manifold alignment
+            feat_fused = x_clip + attn_out.squeeze(1)
+        else:
+            feat_fused = x_clip
+
+        # ReID retrieval branch
+        embedding = self.embedding(feat_fused)
+        bn_features = self.bnneck(embedding)
+
+        outputs = {
+            'features': F.normalize(embedding, dim=1),
+            'bn_features': F.normalize(bn_features, dim=1),
+        }
+
+        # Identity classifier
+        if self.classifier is not None:
+            outputs['logits'] = self.classifier(bn_features)
+
+        # CAL adversarial branch with gradient reversal
+        if self.clothes_classifier is not None:
+            reversed_features = GradientReverse.apply(bn_features, alpha)
+            outputs['clothes_logits'] = self.clothes_classifier(reversed_features)
+
+        return outputs
+
+
 class PedestrianReIDNet(nn.Module):
     def __init__(
         self,
