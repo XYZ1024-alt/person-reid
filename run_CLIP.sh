@@ -79,6 +79,7 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
     --lr-gamma 0.1 \
     --market-root Market-1501 \
     --no-use-part-branch \
+    --cal-weight 0 \
     --triplet-weight 1.0 \
     --triplet-margin 0.3 \
     --weight-decay 0.01 \
