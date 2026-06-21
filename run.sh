@@ -2,8 +2,6 @@
 set -euo pipefail
 
 # Foundation Model Training Pipeline - CLIP ViT-L / EVA-02 Large
-# Expected: Market mAP 88-90%, PRCC mAP 70-73% (SOTA)
-# Training time: ~48 hours on single GPU
 
 # ============================================================================
 # 环境变量配置
@@ -108,10 +106,6 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
     --num-workers ${NUM_WORKERS}
 
   echo ""
-  echo "阶段1预期结果："
-  echo "  Market mAP: 0.85-0.90"
-  echo "  Market Rank-1: 0.92-0.95"
-  echo ""
 fi
 
 # ============================================================================
@@ -195,10 +189,6 @@ if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
     --num-workers ${NUM_WORKERS}
 
   echo ""
-  echo "阶段2预期结果："
-  echo "  Market mAP: 0.88-0.90 (保持)"
-  echo "  PRCC mAP: 0.40-0.45 (中间阶段)"
-  echo ""
 fi
 
 # ============================================================================
@@ -259,11 +249,6 @@ if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
   echo "============================================================================"
   echo "CLIP全程训练完成！"
   echo "============================================================================"
-  echo "阶段3预期结果："
-  echo "  PRCC mAP: 0.70-0.73  ✅ SOTA达成"
-  echo "  PRCC Rank-1: 0.68-0.72"
-  echo "  PRCC Rank-5: 0.85-0.90"
-  echo ""
   echo "最终模型位置："
   echo "  ${CLIP_STAGE3}/best.pth"
   echo "============================================================================"
