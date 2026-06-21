@@ -187,7 +187,7 @@ train_expt4_dev_objective_shift() {
 train_expt4_joint_v1() {
   train_model \
     --mode joint \
-    --epochs 60 \
+    --epochs 40 \
     --batch-size "$BATCH_SIZE" \
     --num-workers "$NUM_WORKERS" \
     --lr 0.0001 \
@@ -202,8 +202,8 @@ train_expt4_joint_v1() {
     --use-part-branch \
     --num-parts 6 \
     --part-embedding-dim 256 \
-    --part-triplet-weight 0.3 \
-    --cloth-invariant-weight 0.5 \
+    --part-triplet-weight 0.0 \
+    --cloth-invariant-weight 0.0 \
     --combined-global-weight 0.7 \
     --combined-part-weight 0.3 \
     --distill-weight 0 \
@@ -213,9 +213,9 @@ train_expt4_joint_v1() {
     --use-dual-classifier \
     --domain-adversarial-weight 0.1 \
     --prcc-ce-weight 0.5 \
-    --prcc-ce-final-weight 0.2 \
+    --prcc-ce-final-weight 0.5 \
     --prcc-ce-ramp-epochs 10 \
-    --cross-clothes-contrastive-weight 0.2 \
+    --cross-clothes-contrastive-weight 0.3 \
     --contrastive-temperature 0.1 \
     --prcc-dev-identities "$PRCC_DEV_IDENTITIES" \
     --prcc-dev-seed "$PRCC_DEV_SEED" \
@@ -223,8 +223,8 @@ train_expt4_joint_v1() {
     --best-dataset prcc_dev \
     --best-variant standard \
     --eval-period 2 \
-    --lr-milestones 20,40,50 \
-    --freeze-backbone-epochs 30 \
+    --lr-milestones 15,30 \
+    --freeze-backbone-epochs 20 \
     --freeze-backbone-layers stem,layer1,layer2 \
     --color-jitter-probability 0.5 \
     --random-grayscale-probability 0.3 \
