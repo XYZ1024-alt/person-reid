@@ -91,7 +91,7 @@ class CLIPViTBackbone(BaseBackbone):
 
         # Freeze patch embedding and position embedding (common practice)
         if freeze_patch_embed:
-            for param in self.model.vision_model.embeddings.parameters():
+            for param in self.model.embeddings.parameters():
                 param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
