@@ -206,6 +206,7 @@ train_expt4_joint_v1() {
     --cloth-invariant-weight 0.0 \
     --combined-global-weight 0.7 \
     --combined-part-weight 0.3 \
+    --teacher-checkpoint "$EXP3/best.pth" \
     --distill-weight 0.08 \
     --distill-final-weight 0.03 \
     --distill-hold-epochs 0 \
