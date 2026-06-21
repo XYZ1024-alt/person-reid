@@ -1052,7 +1052,7 @@ def _classification_losses(outputs, labels: torch.Tensor, sources, prcc_weight: 
     market_loss = _masked_cross_entropy(market_logits, labels, ~prcc_mask, device)
     prcc_labels = _prcc_local_labels(labels, prcc_mask, num_market_classes) if "prcc_logits" in outputs else labels
     prcc_loss = _masked_cross_entropy(prcc_logits, prcc_labels, prcc_mask, device)
-    total = (1.0 - prcc_weight) * market_loss + prcc_weight * prcc_loss
+    total = market_loss + prcc_weight * prcc_loss
     return ClassificationLosses(total, market_loss, prcc_loss)
 
 

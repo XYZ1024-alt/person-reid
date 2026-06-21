@@ -226,8 +226,8 @@ train_expt4_joint_v1() {
     --best-dataset prcc_dev \
     --best-variant standard \
     --eval-period 2 \
-    --lr-milestones 20,32 \
-    --freeze-backbone-epochs 10 \
+    --lr-milestones 25,35 \
+    --freeze-backbone-epochs 15 \
     --freeze-backbone-layers stem,layer1,layer2 \
     --color-jitter-probability 0.3 \
     --random-grayscale-probability 0.1 \
