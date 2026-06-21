@@ -1,6 +1,6 @@
 """
-Backbone architectures for person re-identification.
-Supports both CNN (ResNet50-IBN) and Vision Transformer (CLIP, EVA02) backbones.
+Foundation Model backbones for person re-identification.
+Supports Vision Transformer architectures (CLIP ViT-L, EVA-02 Large).
 """
 from __future__ import annotations
 
@@ -44,28 +44,6 @@ class BaseBackbone(ABC, nn.Module):
             'sequence': ViT-style CLS token [B, D]
         """
         pass
-
-
-class ResNet50IBNBackbone(BaseBackbone):
-    """
-    ResNet50 with Instance-Batch Normalization.
-    This is the original backbone implementation from the project.
-    """
-
-    def __init__(self):
-        super().__init__()
-        # Import the existing implementation
-        from pedestrian_reid.modules.model import ResNet50IBNBackbone as OriginalBackbone
-        self._backbone = OriginalBackbone()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._backbone(x)
-
-    def output_dim(self) -> int:
-        return 2048
-
-    def output_format(self) -> Literal['spatial', 'sequence']:
-        return 'spatial'
 
 
 class CLIPViTBackbone(BaseBackbone):
@@ -175,11 +153,11 @@ class EVA02LBackbone(BaseBackbone):
 
 
 def create_backbone(
-    backbone_type: Literal['resnet50_ibn', 'clip_vit_l', 'eva02_l'],
+    backbone_type: Literal['clip_vit_l', 'eva02_l'],
     pretrained: bool = True
 ) -> BaseBackbone:
     """
-    Factory function to create backbone instances.
+    Factory function to create Foundation Model backbones.
 
     Args:
         backbone_type: Type of backbone to create
@@ -188,14 +166,12 @@ def create_backbone(
     Returns:
         Initialized backbone instance
     """
-    if backbone_type == 'resnet50_ibn':
-        return ResNet50IBNBackbone()
-    elif backbone_type == 'clip_vit_l':
+    if backbone_type == 'clip_vit_l':
         return CLIPViTBackbone(pretrained=pretrained)
     elif backbone_type == 'eva02_l':
         return EVA02LBackbone(pretrained=pretrained)
     else:
         raise ValueError(
             f"Unknown backbone type: {backbone_type}. "
-            f"Supported: resnet50_ibn, clip_vit_l, eva02_l"
+            f"Supported: clip_vit_l, eva02_l"
         )

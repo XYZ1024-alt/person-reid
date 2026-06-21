@@ -8,115 +8,13 @@ import torch.nn.functional as F
 
 
 INPUT_CHANNELS = 3
-STEM_CHANNELS = 64
-BOTTLENECK_EXPANSION = 4
 EMBEDDING_DIM = 256
 PART_EMBEDDING_DIM = 256
 DEFAULT_NUM_PARTS = 6
 DEFAULT_COMBINED_GLOBAL_WEIGHT = 0.7
 DEFAULT_COMBINED_PART_WEIGHT = 0.3
-REID_FEATURE_DIM = 2048
-CONV1_KERNEL = 7
-CONV3_KERNEL = 3
-POINTWISE_KERNEL = 1
-CONV1_PADDING = 3
-CONV3_PADDING = 1
-STEM_STRIDE = 2
-LAST_STRIDE = 1
-HALF_RATIO = 2
 GRAD_REVERSE_SCALE = 1.0
-IMAGENET_LOADED_PREFIX = "Loaded ImageNet pretrained backbone parameters"
 MIN_PARTS = 1
-
-
-@dataclass(frozen=True)
-class BlockConfig:
-    in_channels: int
-    channels: int
-    stride: int
-    use_ibn: bool
-    downsample: nn.Module | None
-
-
-@dataclass(frozen=True)
-class LayerConfig:
-    channels: int
-    blocks: int
-    stride: int
-    use_ibn: bool
-
-
-class IBN(nn.Module):
-    def __init__(self, channels: int):
-        super().__init__()
-        half_channels = channels // HALF_RATIO
-        self.split = half_channels
-        self.instance_norm = nn.InstanceNorm2d(half_channels, affine=True)
-        self.batch_norm = nn.BatchNorm2d(channels - half_channels)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        first, second = torch.split(inputs, [self.split, inputs.size(1) - self.split], dim=1)
-        return torch.cat((self.instance_norm(first), self.batch_norm(second)), dim=1)
-
-
-class BottleneckIBN(nn.Module):
-    expansion = BOTTLENECK_EXPANSION
-
-    def __init__(self, config: BlockConfig):
-        super().__init__()
-        out_channels = config.channels * self.expansion
-        self.conv1 = _conv1x1(config.in_channels, config.channels)
-        self.norm1 = IBN(config.channels) if config.use_ibn else nn.BatchNorm2d(config.channels)
-        self.conv2 = _conv3x3(config.channels, config.channels, config.stride)
-        self.bn2 = nn.BatchNorm2d(config.channels)
-        self.conv3 = _conv1x1(config.channels, out_channels)
-        self.bn3 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = config.downsample
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        residual = inputs
-        outputs = self.relu(self.norm1(self.conv1(inputs)))
-        outputs = self.relu(self.bn2(self.conv2(outputs)))
-        outputs = self.bn3(self.conv3(outputs))
-        if self.downsample is not None:
-            residual = self.downsample(inputs)
-        return self.relu(outputs + residual)
-
-
-class ResNet50IBNBackbone(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.in_channels = STEM_CHANNELS
-        self.stem = nn.Sequential(
-            nn.Conv2d(INPUT_CHANNELS, STEM_CHANNELS, CONV1_KERNEL, STEM_STRIDE, CONV1_PADDING, bias=False),
-            nn.BatchNorm2d(STEM_CHANNELS),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=CONV3_KERNEL, stride=STEM_STRIDE, padding=CONV3_PADDING),
-        )
-        self.layer1 = self._make_layer(LayerConfig(64, 3, 1, True))
-        self.layer2 = self._make_layer(LayerConfig(128, 4, 2, True))
-        self.layer3 = self._make_layer(LayerConfig(256, 6, 2, True))
-        self.layer4 = self._make_layer(LayerConfig(512, 3, LAST_STRIDE, False))
-
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        features = self.stem(images)
-        features = self.layer1(features)
-        features = self.layer2(features)
-        features = self.layer3(features)
-        return self.layer4(features)
-
-    def _make_layer(self, config: LayerConfig) -> nn.Sequential:
-        downsample = _downsample(self.in_channels, config.channels, config.stride)
-        blocks = [self._build_block(config, config.stride, downsample)]
-        self.in_channels = config.channels * BOTTLENECK_EXPANSION
-        for _ in range(1, config.blocks):
-            blocks.append(self._build_block(config, 1, None))
-        return nn.Sequential(*blocks)
-
-    def _build_block(self, config: LayerConfig, stride: int, downsample: nn.Module | None) -> BottleneckIBN:
-        block_config = BlockConfig(self.in_channels, config.channels, stride, config.use_ibn, downsample)
-        return BottleneckIBN(block_config)
 
 
 class GradientReverse(torch.autograd.Function):
@@ -131,7 +29,7 @@ class GradientReverse(torch.autograd.Function):
 
 
 class PartFeatureBranch(nn.Module):
-    def __init__(self, num_parts: int, embedding_dim: int, in_channels: int = REID_FEATURE_DIM):
+    def __init__(self, num_parts: int, embedding_dim: int, in_channels: int):
         super().__init__()
         if num_parts < MIN_PARTS:
             raise ValueError(f"num_parts must be >= {MIN_PARTS}, got {num_parts}")
@@ -187,7 +85,7 @@ class PedestrianReIDNet(nn.Module):
         num_market_classes: int = 0,
         num_prcc_classes: int = 0,
         use_domain_adversarial: bool = False,
-        backbone_type: str = 'resnet50_ibn',
+        backbone_type: str = 'clip_vit_l',
         backbone_pretrained: bool = True,
     ):
         super().__init__()
@@ -221,7 +119,7 @@ class PedestrianReIDNet(nn.Module):
         self.classifier = _identity_classifier(embedding_dim, num_market_classes if use_dual_classifier else num_classes)
         self.prcc_classifier = _identity_classifier(embedding_dim, num_prcc_classes) if use_dual_classifier else None
         self.clothes_classifier = _clothes_classifier(embedding_dim, num_clothes_classes)
-        self.part_branch = _part_branch(use_part_branch, num_parts, part_embedding_dim)
+        self.part_branch = _part_branch(use_part_branch, num_parts, part_embedding_dim, backbone_dim)
         self.domain_discriminator = DomainDiscriminator(embedding_dim) if use_domain_adversarial else None
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -271,21 +169,6 @@ class PedestrianReIDNet(nn.Module):
         return self.classifier(bn_features)
 
 
-def _conv1x1(in_channels: int, out_channels: int, stride: int = 1) -> nn.Conv2d:
-    return nn.Conv2d(in_channels, out_channels, POINTWISE_KERNEL, stride=stride, bias=False)
-
-
-def _conv3x3(in_channels: int, out_channels: int, stride: int) -> nn.Conv2d:
-    return nn.Conv2d(in_channels, out_channels, CONV3_KERNEL, stride, CONV3_PADDING, bias=False)
-
-
-def _downsample(in_channels: int, channels: int, stride: int) -> nn.Module | None:
-    out_channels = channels * BOTTLENECK_EXPANSION
-    if stride == 1 and in_channels == out_channels:
-        return None
-    return nn.Sequential(_conv1x1(in_channels, out_channels, stride), nn.BatchNorm2d(out_channels))
-
-
 def _clothes_classifier(embedding_dim: int, num_clothes_classes: int) -> nn.Linear | None:
     if num_clothes_classes <= 0:
         return None
@@ -298,7 +181,7 @@ def _identity_classifier(embedding_dim: int, num_classes: int) -> nn.Linear | No
     return nn.Linear(embedding_dim, num_classes, bias=False)
 
 
-def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int, backbone_dim: int = REID_FEATURE_DIM) -> PartFeatureBranch | None:
+def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int, backbone_dim: int) -> PartFeatureBranch | None:
     if not use_part_branch:
         return None
     return PartFeatureBranch(num_parts, part_embedding_dim, in_channels=backbone_dim)
@@ -324,91 +207,3 @@ def _validate_combined_weights(global_weight: float, part_weight: float) -> None
         raise ValueError("at least one combined feature weight must be > 0")
 
 
-def load_imagenet_pretrained_backbone(backbone: ResNet50IBNBackbone, *, verbose: bool = True) -> int:
-    from torchvision.models import ResNet50_Weights, resnet50
-
-    source = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).state_dict()
-    loaded = _load_stem(backbone, source)
-    loaded += _load_resnet_layers(backbone, source)
-    if verbose:
-        print(f"{IMAGENET_LOADED_PREFIX}: {loaded}")
-    return loaded
-
-
-def _load_stem(backbone: ResNet50IBNBackbone, source: dict[str, torch.Tensor]) -> int:
-    _copy_parameter(backbone.stem[0].weight, source["conv1.weight"])
-    _load_batch_norm(backbone.stem[1], source, "bn1")
-    return 6
-
-
-def _load_resnet_layers(backbone: ResNet50IBNBackbone, source: dict[str, torch.Tensor]) -> int:
-    loaded = 0
-    for layer_name in ["layer1", "layer2", "layer3", "layer4"]:
-        loaded += _load_layer(getattr(backbone, layer_name), source, layer_name)
-    return loaded
-
-
-def _load_layer(layer: nn.Sequential, source: dict[str, torch.Tensor], layer_name: str) -> int:
-    loaded = 0
-    for block_index, block in enumerate(layer):
-        prefix = f"{layer_name}.{block_index}"
-        loaded += _load_block(block, source, prefix)
-    return loaded
-
-
-def _load_block(block: BottleneckIBN, source: dict[str, torch.Tensor], prefix: str) -> int:
-    loaded = _load_block_convolutions(block, source, prefix)
-    loaded += _load_norm1(block.norm1, source, f"{prefix}.bn1")
-    loaded += _load_batch_norm(block.bn2, source, f"{prefix}.bn2")
-    loaded += _load_batch_norm(block.bn3, source, f"{prefix}.bn3")
-    if block.downsample is not None:
-        loaded += _load_downsample(block.downsample, source, f"{prefix}.downsample")
-    return loaded
-
-
-def _load_block_convolutions(block: BottleneckIBN, source: dict[str, torch.Tensor], prefix: str) -> int:
-    _copy_parameter(block.conv1.weight, source[f"{prefix}.conv1.weight"])
-    _copy_parameter(block.conv2.weight, source[f"{prefix}.conv2.weight"])
-    _copy_parameter(block.conv3.weight, source[f"{prefix}.conv3.weight"])
-    return 3
-
-
-def _load_norm1(norm: nn.Module, source: dict[str, torch.Tensor], prefix: str) -> int:
-    if isinstance(norm, IBN):
-        return _load_ibn(norm, source, prefix)
-    return _load_batch_norm(norm, source, prefix)
-
-
-def _load_ibn(norm: IBN, source: dict[str, torch.Tensor], prefix: str) -> int:
-    _load_batch_norm_suffix(norm.batch_norm, source, prefix, norm.split)
-    return 5
-
-
-def _load_downsample(downsample: nn.Sequential, source: dict[str, torch.Tensor], prefix: str) -> int:
-    _copy_parameter(downsample[0].weight, source[f"{prefix}.0.weight"])
-    return 1 + _load_batch_norm(downsample[1], source, f"{prefix}.1")
-
-
-def _load_batch_norm(module: nn.BatchNorm2d, source: dict[str, torch.Tensor], prefix: str) -> int:
-    _copy_parameter(module.weight, source[f"{prefix}.weight"])
-    _copy_parameter(module.bias, source[f"{prefix}.bias"])
-    _copy_buffer(module.running_mean, source[f"{prefix}.running_mean"])
-    _copy_buffer(module.running_var, source[f"{prefix}.running_var"])
-    _copy_buffer(module.num_batches_tracked, source[f"{prefix}.num_batches_tracked"])
-    return 5
-
-
-def _load_batch_norm_suffix(module: nn.BatchNorm2d, source: dict[str, torch.Tensor], prefix: str, start: int) -> None:
-    _copy_parameter(module.weight, source[f"{prefix}.weight"][start:])
-    _copy_parameter(module.bias, source[f"{prefix}.bias"][start:])
-    _copy_buffer(module.running_mean, source[f"{prefix}.running_mean"][start:])
-    _copy_buffer(module.running_var, source[f"{prefix}.running_var"][start:])
-    _copy_buffer(module.num_batches_tracked, source[f"{prefix}.num_batches_tracked"])
-
-
-def _copy_parameter(target: nn.Parameter, source: torch.Tensor) -> None:
-    target.data.copy_(source)
-
-
-def _copy_buffer(target: torch.Tensor, source: torch.Tensor) -> None:
-    target.copy_(source)
