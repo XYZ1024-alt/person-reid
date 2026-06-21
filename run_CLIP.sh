@@ -78,7 +78,7 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
     --lr-milestones 40,50 \
     --lr-gamma 0.1 \
     --market-root Market-1501 \
-    --use-part-branch false \
+    --no-use-part-branch \
     --triplet-weight 1.0 \
     --triplet-margin 0.3 \
     --weight-decay 0.01 \
@@ -150,7 +150,7 @@ if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
     --sketch-warmup-epochs 5 \
     --sketch-ramp-epochs 20 \
     --freeze-backbone-epochs 10 \
-    --use-part-branch false \
+    --no-use-part-branch \
     --triplet-weight 1.0 \
     --triplet-margin 0.3 \
     --weight-decay 0.01 \
@@ -226,7 +226,7 @@ if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
     --sketch-ramp-epochs 3 \
     --cross-clothes-contrastive-weight 0.5 \
     --contrastive-temperature 0.10 \
-    --use-part-branch false \
+    --no-use-part-branch \
     --triplet-weight 1.0 \
     --triplet-margin 0.3 \
     --weight-decay 0.01 \
