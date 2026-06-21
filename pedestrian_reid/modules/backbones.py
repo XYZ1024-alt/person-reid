@@ -98,9 +98,18 @@ class CLIPViTBackbone(BaseBackbone):
         """
         Forward pass through CLIP ViT.
 
+        Args:
+            x: Input tensor [B, 3, H, W] - any size will be resized to 224x224
+
         Returns:
             CLS token features [B, 1024]
         """
+        # CLIP expects 224x224 input, resize if needed
+        if x.shape[2] != 224 or x.shape[3] != 224:
+            x = torch.nn.functional.interpolate(
+                x, size=(224, 224), mode='bilinear', align_corners=False
+            )
+
         outputs = self.model(x, output_hidden_states=False)
         # Return the pooled output (CLS token after final layer norm)
         return outputs.pooler_output
@@ -142,9 +151,18 @@ class EVA02LBackbone(BaseBackbone):
         """
         Forward pass through EVA-02.
 
+        Args:
+            x: Input tensor [B, 3, H, W] - any size will be resized to 448x448
+
         Returns:
             CLS token features [B, 1024]
         """
+        # EVA-02 expects 448x448 input, resize if needed
+        if x.shape[2] != 448 or x.shape[3] != 448:
+            x = torch.nn.functional.interpolate(
+                x, size=(448, 448), mode='bilinear', align_corners=False
+            )
+
         x = self.model.forward_features(x)
         # Take CLS token (first token)
         return x[:, 0]
