@@ -194,10 +194,10 @@ train_expt4_joint_v1() {
     --cal-weight 0 \
     --cal-warmup-epochs 0 \
     --cal-ramp-epochs 0 \
-    --sketch-loss-weight 0.3 \
-    --rgb-sketch-consistency-weight 0.15 \
+    --sketch-loss-weight 0.1 \
+    --rgb-sketch-consistency-weight 0.05 \
     --sketch-warmup-epochs 5 \
-    --sketch-ramp-epochs 15 \
+    --sketch-ramp-epochs 20 \
     --prcc-identities-ratio 0.75 \
     --use-part-branch \
     --num-parts 6 \
@@ -206,30 +206,32 @@ train_expt4_joint_v1() {
     --cloth-invariant-weight 0.0 \
     --combined-global-weight 0.7 \
     --combined-part-weight 0.3 \
-    --distill-weight 0 \
-    --distill-final-weight 0 \
+    --distill-weight 0.08 \
+    --distill-final-weight 0.03 \
+    --distill-hold-epochs 0 \
+    --distill-ramp-epochs 5 \
     --triplet-feature-key combined_features \
     --feature-key combined_features \
     --use-dual-classifier \
-    --domain-adversarial-weight 0.1 \
-    --prcc-ce-weight 1.0 \
-    --prcc-ce-final-weight 0.5 \
-    --prcc-ce-ramp-epochs 10 \
+    --domain-adversarial-weight 0.0 \
+    --prcc-ce-weight 0.0 \
+    --prcc-ce-final-weight 1.0 \
+    --prcc-ce-ramp-epochs 20 \
     --cross-clothes-contrastive-weight 0.3 \
-    --contrastive-temperature 0.1 \
+    --contrastive-temperature 0.07 \
     --prcc-dev-identities "$PRCC_DEV_IDENTITIES" \
     --prcc-dev-seed "$PRCC_DEV_SEED" \
     --best-metric mAP \
     --best-dataset prcc_dev \
     --best-variant standard \
     --eval-period 2 \
-    --lr-milestones 15,30 \
-    --freeze-backbone-epochs 20 \
+    --lr-milestones 20,32 \
+    --freeze-backbone-epochs 10 \
     --freeze-backbone-layers stem,layer1,layer2 \
-    --color-jitter-probability 0.5 \
-    --random-grayscale-probability 0.3 \
-    --dark-augment-probability 0.05 \
-    --occlusion-augment-probability 0.1 \
+    --color-jitter-probability 0.3 \
+    --random-grayscale-probability 0.1 \
+    --dark-augment-probability 0.0 \
+    --occlusion-augment-probability 0.05 \
     --pretrained-checkpoint "$EXP3/best.pth" \
     --output-dir "$EXP4_JOINT_V1"
 }
