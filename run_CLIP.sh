@@ -31,7 +31,7 @@ PRECISION="${PRECISION:-fp16}"  # 选项: fp16, fp32
 
 # Set PYTHONPATH to include project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${PYTHONPATH}:${SCRIPT_DIR}"
+export PYTHONPATH="${PYTHONPATH:-}:${SCRIPT_DIR}"
 echo "PYTHONPATH set to: ${PYTHONPATH}"
 
 if [[ -z "${OMP_NUM_THREADS:-}" || ! "${OMP_NUM_THREADS}" =~ ^[0-9]+$ || "${OMP_NUM_THREADS}" -lt 1 ]]; then
