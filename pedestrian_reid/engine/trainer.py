@@ -673,20 +673,36 @@ def configure_backbone_freeze(model, args: Namespace, epoch: int, *, distributed
         rank_zero_print(distributed, f"backbone_layers_{action}={','.join(layers)} epoch={epoch + 1}")
 
 
+def _is_resnet_backbone(backbone) -> bool:
+    """Check if backbone is ResNet50-IBN (has CNN layer structure)."""
+    from pedestrian_reid.modules.backbones import ResNet50IBNBackbone
+    return isinstance(backbone, ResNet50IBNBackbone)
+
+
 def _set_backbone_layers_trainable(model, layer_names: list[str], trainable: bool) -> int:
+    # Skip for non-ResNet backbones (CLIP, EVA02, etc.)
+    if not _is_resnet_backbone(model.backbone):
+        return 0
+
     changed = 0
     for layer_name in layer_names:
-        for parameter in getattr(model.backbone, layer_name).parameters():
-            changed += int(parameter.requires_grad != trainable)
-            parameter.requires_grad = trainable
+        if hasattr(model.backbone, layer_name):
+            for parameter in getattr(model.backbone, layer_name).parameters():
+                changed += int(parameter.requires_grad != trainable)
+                parameter.requires_grad = trainable
     return changed
 
 
 def _set_frozen_backbone_layers_eval(model, layer_names: list[str], freeze: bool) -> None:
     if not freeze:
         return
+    # Skip for non-ResNet backbones (CLIP, EVA02, etc.)
+    if not _is_resnet_backbone(model.backbone):
+        return
+
     for layer_name in layer_names:
-        getattr(model.backbone, layer_name).eval()
+        if hasattr(model.backbone, layer_name):
+            getattr(model.backbone, layer_name).eval()
 
 
 def _freeze_backbone_layers(args: Namespace) -> list[str]:
@@ -694,6 +710,12 @@ def _freeze_backbone_layers(args: Namespace) -> list[str]:
 
 
 def _active_freeze_layers(args: Namespace) -> list[str]:
+    backbone_type = getattr(args, "backbone", "resnet50_ibn")
+
+    # Return empty list for non-ResNet backbones
+    if backbone_type != "resnet50_ibn":
+        return []
+
     if args.freeze_backbone_all_epochs:
         return list(BACKBONE_LAYER_ORDER)
     return _freeze_backbone_layers(args)
@@ -945,12 +967,21 @@ def _validate_probability_args(args: Namespace) -> None:
 def _validate_freeze_args(args: Namespace) -> None:
     if args.freeze_backbone_epochs < 0:
         raise ValueError("freeze_backbone_epochs must be >= 0")
-    layers = _freeze_backbone_layers(args)
-    if args.freeze_backbone_epochs > 0 and not layers:
-        raise ValueError("freeze_backbone_layers must not be empty when freeze_backbone_epochs > 0")
-    invalid = set(layers) - FREEZABLE_BACKBONE_LAYERS
-    if invalid:
-        raise ValueError(f"Unknown freeze_backbone_layers: {sorted(invalid)}")
+
+    backbone_type = getattr(args, "backbone", "resnet50_ibn")
+
+    # Only validate freeze layers for ResNet backbones
+    if backbone_type == "resnet50_ibn":
+        layers = _freeze_backbone_layers(args)
+        if args.freeze_backbone_epochs > 0 and not layers:
+            raise ValueError("freeze_backbone_layers must not be empty when freeze_backbone_epochs > 0")
+        invalid = set(layers) - FREEZABLE_BACKBONE_LAYERS
+        if invalid:
+            raise ValueError(f"Unknown freeze_backbone_layers: {sorted(invalid)}")
+    else:
+        # Warn if freeze args are set for non-ResNet backbones
+        if args.freeze_backbone_epochs > 0 or args.freeze_backbone_all_epochs:
+            print(f"Warning: freeze_backbone_* args are ignored for {backbone_type} backbone")
 
 
 def save_checkpoint(path: Path, request: CheckpointSaveRequest) -> None:
