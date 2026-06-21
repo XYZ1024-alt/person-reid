@@ -22,7 +22,7 @@ from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, load_mod
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.losses import batch_hard_triplet_loss
 from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY, FEATURE_KEYS
-from pedestrian_reid.modules.model import PedestrianReIDNet, load_imagenet_pretrained_backbone
+from pedestrian_reid.modules.model import PedestrianReIDNet
 
 
 try:
@@ -80,10 +80,7 @@ DDP_FIND_UNUSED_FALSE = "false"
 ENV_RANK = "RANK"
 ENV_WORLD_SIZE = "WORLD_SIZE"
 ENV_LOCAL_RANK = "LOCAL_RANK"
-FREEZABLE_BACKBONE_LAYERS = {"stem", "layer1", "layer2", "layer3", "layer4"}
-BACKBONE_LAYER_ORDER = ("stem", "layer1", "layer2", "layer3", "layer4")
 PRETRAIN_SKIP_PREVIEW_LIMIT = 10
-MIN_IMAGENET_PRETRAINED_TENSORS = 300
 PRCC_EXPECTED_CLOTHES_PER_IDENTITY = 2
 MIN_PARTS = 1
 NO_PART_LOSS = 0.0
@@ -371,29 +368,17 @@ def set_seed(seed: int) -> None:
 
 
 def initialize_model_weights(model: PedestrianReIDNet, args: Namespace, distributed: DistributedContext) -> int | None:
+    """Initialize model weights from pretrained checkpoint or Foundation Model defaults."""
     if args.resume:
         return None
     if args.pretrained_checkpoint:
         return load_compatible_pretrained_checkpoint(model, args.pretrained_checkpoint, distributed)
 
-    # Only load ImageNet weights for ResNet50-IBN backbone
-    # Foundation models (CLIP, EVA02) are already pretrained from Hugging Face/timm
-    backbone_type = getattr(args, "backbone", "resnet50_ibn")
-    if backbone_type == "resnet50_ibn":
-        # ResNet50IBNBackbone wrapper contains the original implementation in _backbone
-        from pedestrian_reid.modules.backbones import ResNet50IBNBackbone
-        if isinstance(model.backbone, ResNet50IBNBackbone):
-            loaded = load_imagenet_pretrained_backbone(model.backbone._backbone, verbose=distributed.is_main)
-        else:
-            # Direct ResNet50IBNBackbone from model.py (legacy compatibility)
-            loaded = load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
-        _require_imagenet_pretrained_parameters(loaded)
-        return loaded
-    else:
-        # Foundation models are already initialized with pretrained weights
-        if distributed.is_main:
-            print(f"Using pretrained {backbone_type} backbone (no ImageNet loading needed)")
-        return None
+    # Foundation models (CLIP, EVA02) come pretrained from Hugging Face/timm
+    backbone_type = getattr(args, "backbone", "clip_vit_l")
+    if distributed.is_main:
+        print(f"Using pretrained {backbone_type} backbone")
+    return None
 
 
 def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
@@ -409,19 +394,18 @@ def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
         num_market_classes=dataset.num_market_classes,
         num_prcc_classes=dataset.num_prcc_classes,
         use_domain_adversarial=getattr(args, "use_domain_adversarial", False),
-        backbone_type=getattr(args, "backbone", "resnet50_ibn"),
+        backbone_type=getattr(args, "backbone", "clip_vit_l"),
         backbone_pretrained=True,
     )
 
 
 def build_optimizer(model: PedestrianReIDNet, args: Namespace) -> torch.optim.Optimizer:
     """
-    Build optimizer with optional grouped learning rates for Foundation Models.
+    Build optimizer with grouped learning rates for Foundation Models.
 
     For CLIP/EVA02 backbones, uses smaller learning rate for backbone and larger for heads.
-    For ResNet50-IBN, uses uniform learning rate.
     """
-    backbone_type = getattr(args, "backbone", "resnet50_ibn")
+    backbone_type = getattr(args, "backbone", "clip_vit_l")
 
     # Use grouped learning rates for Foundation Models
     if backbone_type in ['clip_vit_l', 'eva02_l'] and (args.backbone_lr is not None or args.head_lr is not None):
@@ -444,7 +428,7 @@ def build_optimizer(model: PedestrianReIDNet, args: Namespace) -> torch.optim.Op
         ]
         return torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
     else:
-        # Uniform learning rate for ResNet50-IBN
+        # Uniform learning rate (when backbone_lr/head_lr not specified)
         return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
@@ -472,11 +456,6 @@ def load_compatible_pretrained_checkpoint(model: PedestrianReIDNet, path: str, d
     rank_zero_print(distributed, f"Loaded compatible classifier parameters: {loaded_heads}")
     _print_skipped_pretrained_parameters(distributed, skipped)
     return len(selected)
-
-
-def _require_imagenet_pretrained_parameters(loaded: int) -> None:
-    if loaded < MIN_IMAGENET_PRETRAINED_TENSORS:
-        raise RuntimeError(f"ImageNet pretrained backbone load is incomplete: loaded_tensors={loaded}")
 
 
 def _compatible_pretrained_state(
@@ -674,9 +653,8 @@ def configure_backbone_freeze(model, args: Namespace, epoch: int, *, distributed
 
 
 def _is_resnet_backbone(backbone) -> bool:
-    """Check if backbone is ResNet50-IBN (has CNN layer structure)."""
-    from pedestrian_reid.modules.backbones import ResNet50IBNBackbone
-    return isinstance(backbone, ResNet50IBNBackbone)
+    """Check if backbone is ResNet (always False - ResNet support removed)."""
+    return False
 
 
 def _set_backbone_layers_trainable(model, layer_names: list[str], trainable: bool) -> int:
@@ -710,15 +688,8 @@ def _freeze_backbone_layers(args: Namespace) -> list[str]:
 
 
 def _active_freeze_layers(args: Namespace) -> list[str]:
-    backbone_type = getattr(args, "backbone", "resnet50_ibn")
-
-    # Return empty list for non-ResNet backbones
-    if backbone_type != "resnet50_ibn":
-        return []
-
-    if args.freeze_backbone_all_epochs:
-        return list(BACKBONE_LAYER_ORDER)
-    return _freeze_backbone_layers(args)
+    """Return list of layers to freeze (empty for Foundation Models)."""
+    return []
 
 
 def train_one_epoch(
@@ -965,23 +936,13 @@ def _validate_probability_args(args: Namespace) -> None:
 
 
 def _validate_freeze_args(args: Namespace) -> None:
+    """Validate backbone freezing arguments."""
     if args.freeze_backbone_epochs < 0:
         raise ValueError("freeze_backbone_epochs must be >= 0")
 
-    backbone_type = getattr(args, "backbone", "resnet50_ibn")
-
-    # Only validate freeze layers for ResNet backbones
-    if backbone_type == "resnet50_ibn":
-        layers = _freeze_backbone_layers(args)
-        if args.freeze_backbone_epochs > 0 and not layers:
-            raise ValueError("freeze_backbone_layers must not be empty when freeze_backbone_epochs > 0")
-        invalid = set(layers) - FREEZABLE_BACKBONE_LAYERS
-        if invalid:
-            raise ValueError(f"Unknown freeze_backbone_layers: {sorted(invalid)}")
-    else:
-        # Warn if freeze args are set for non-ResNet backbones
-        if args.freeze_backbone_epochs > 0 or args.freeze_backbone_all_epochs:
-            print(f"Warning: freeze_backbone_* args are ignored for {backbone_type} backbone")
+    backbone_type = getattr(args, "backbone", "clip_vit_l")
+    if args.freeze_backbone_epochs > 0:
+        print(f"Note: Backbone freezing for {backbone_type} applies to entire model, not per-layer")
 
 
 def save_checkpoint(path: Path, request: CheckpointSaveRequest) -> None:
