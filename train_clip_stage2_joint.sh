@@ -1,7 +1,5 @@
 #!/bin/bash
 # 阶段2：CLIP Joint训练（Market + PRCC）
-# 目标：Market mAP 88-90%, PRCC mAP 40-45%
-# 训练时长：18-22小时
 
 python scripts/train.py \
     --backbone clip_vit_l \

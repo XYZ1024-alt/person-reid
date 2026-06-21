@@ -1,7 +1,5 @@
 #!/bin/bash
 # 阶段3：CLIP PRCC微调
-# 目标：PRCC mAP 70-73%（SOTA）
-# 训练时长：6-8小时
 
 python scripts/train.py \
     --backbone clip_vit_l \

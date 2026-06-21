@@ -1,7 +1,5 @@
 #!/bin/bash
 # 阶段1：CLIP Market预训练（替代ExpT1-T3）
-# 目标：Market mAP 85-90%
-# 训练时长：20-24小时
 
 python scripts/train.py \
     --backbone clip_vit_l \
