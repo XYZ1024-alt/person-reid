@@ -12,7 +12,15 @@ BATCH_SIZE="${BATCH_SIZE:-64}"  # CLIP推荐64，如果OOM降至32
 NUM_WORKERS="${NUM_WORKERS:-12}"
 START_STAGE="${START_STAGE:-1}"
 STOP_STAGE="${STOP_STAGE:-3}"
-PYTHON="${PYTHON:-python}"
+
+# 根据GPU数量选择训练命令
+if [[ "$GPUS" -gt 1 ]]; then
+  PYTHON="torchrun --nproc_per_node=${GPUS}"
+  DISTRIBUTED_ARG="--distributed"
+else
+  PYTHON="python"
+  DISTRIBUTED_ARG=""
+fi
 USE_MLFLOW="${USE_MLFLOW:-0}"
 MLFLOW_EXPERIMENT="${MLFLOW_EXPERIMENT:-pedestrian_reid_clip}"
 MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:./outputs/mlruns}"
@@ -93,6 +101,7 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
     --num-workers ${NUM_WORKERS} \
     --precision ${PRECISION} \
     --output-dir ${CLIP_STAGE1} \
+    ${DISTRIBUTED_ARG} \
     ${MLFLOW_ARGS}
 
   echo ""
@@ -166,6 +175,7 @@ if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
     --num-workers ${NUM_WORKERS} \
     --precision ${PRECISION} \
     --output-dir ${CLIP_STAGE2} \
+    ${DISTRIBUTED_ARG} \
     ${MLFLOW_ARGS}
 
   echo ""
@@ -237,6 +247,7 @@ if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
     --num-workers ${NUM_WORKERS} \
     --precision ${PRECISION} \
     --output-dir ${CLIP_STAGE3} \
+    ${DISTRIBUTED_ARG} \
     ${MLFLOW_ARGS}
 
   echo ""
