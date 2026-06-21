@@ -24,6 +24,10 @@ USE_MLFLOW="${USE_MLFLOW:-0}"
 MLFLOW_EXPERIMENT="${MLFLOW_EXPERIMENT:-pedestrian_reid}"
 MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:./outputs/mlruns}"
 
+# Set PYTHONPATH to include project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${PYTHONPATH}:${SCRIPT_DIR}"
+
 if [[ -z "${OMP_NUM_THREADS:-}" || ! "${OMP_NUM_THREADS}" =~ ^[0-9]+$ || "${OMP_NUM_THREADS}" -lt 1 ]]; then
   echo "set OMP_NUM_THREADS=1 (was '${OMP_NUM_THREADS:-unset}')"
   export OMP_NUM_THREADS=1
