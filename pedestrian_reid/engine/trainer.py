@@ -1059,9 +1059,8 @@ def _classification_losses(outputs, labels: torch.Tensor, sources, prcc_weight: 
 def _prcc_local_labels(labels: torch.Tensor, prcc_mask: torch.Tensor, num_market_classes: int) -> torch.Tensor:
     if num_market_classes <= 0:
         return labels
-    has_market = (~prcc_mask).any().item()
     has_prcc = prcc_mask.any().item()
-    if not (has_market and has_prcc):
+    if not has_prcc:
         return labels
     local = labels.clone()
     local[prcc_mask] = labels[prcc_mask] - num_market_classes

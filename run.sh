@@ -198,7 +198,7 @@ train_expt4_joint_v1() {
     --rgb-sketch-consistency-weight 0.15 \
     --sketch-warmup-epochs 5 \
     --sketch-ramp-epochs 15 \
-    --prcc-identities-ratio 0.85 \
+    --prcc-identities-ratio 0.75 \
     --use-part-branch \
     --num-parts 6 \
     --part-embedding-dim 256 \
@@ -212,7 +212,7 @@ train_expt4_joint_v1() {
     --feature-key combined_features \
     --use-dual-classifier \
     --domain-adversarial-weight 0.1 \
-    --prcc-ce-weight 0.5 \
+    --prcc-ce-weight 1.0 \
     --prcc-ce-final-weight 0.5 \
     --prcc-ce-ramp-epochs 10 \
     --cross-clothes-contrastive-weight 0.3 \
