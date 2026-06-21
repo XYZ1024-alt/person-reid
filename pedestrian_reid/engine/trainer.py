@@ -375,9 +375,25 @@ def initialize_model_weights(model: PedestrianReIDNet, args: Namespace, distribu
         return None
     if args.pretrained_checkpoint:
         return load_compatible_pretrained_checkpoint(model, args.pretrained_checkpoint, distributed)
-    loaded = load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
-    _require_imagenet_pretrained_parameters(loaded)
-    return loaded
+
+    # Only load ImageNet weights for ResNet50-IBN backbone
+    # Foundation models (CLIP, EVA02) are already pretrained from Hugging Face/timm
+    backbone_type = getattr(args, "backbone", "resnet50_ibn")
+    if backbone_type == "resnet50_ibn":
+        # ResNet50IBNBackbone wrapper contains the original implementation in _backbone
+        from pedestrian_reid.modules.backbones import ResNet50IBNBackbone
+        if isinstance(model.backbone, ResNet50IBNBackbone):
+            loaded = load_imagenet_pretrained_backbone(model.backbone._backbone, verbose=distributed.is_main)
+        else:
+            # Direct ResNet50IBNBackbone from model.py (legacy compatibility)
+            loaded = load_imagenet_pretrained_backbone(model.backbone, verbose=distributed.is_main)
+        _require_imagenet_pretrained_parameters(loaded)
+        return loaded
+    else:
+        # Foundation models are already initialized with pretrained weights
+        if distributed.is_main:
+            print(f"Using pretrained {backbone_type} backbone (no ImageNet loading needed)")
+        return None
 
 
 def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
