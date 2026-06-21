@@ -7,3 +7,5 @@ tqdm
 matplotlib
 tensorboard
 mlflow
+transformers>=4.30.0
+timm>=0.9.0

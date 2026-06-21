@@ -1,0 +1,50 @@
+#!/bin/bash
+# 阶段2：CLIP Joint训练（Market + PRCC）
+# 目标：Market mAP 88-90%, PRCC mAP 40-45%
+# 训练时长：18-22小时
+
+python scripts/train.py \
+    --backbone clip_vit_l \
+    --backbone-lr 7.5e-6 \
+    --head-lr 1e-4 \
+    --mode joint \
+    --epochs 50 \
+    --batch-size 64 \
+    --lr-scheduler step \
+    --lr-milestones 30,45 \
+    --lr-gamma 0.1 \
+    --market-root Market-1501 \
+    --prcc-root prcc \
+    --prcc-identities-ratio 0.75 \
+    --use-dual-classifier \
+    --domain-adversarial-weight 0.1 \
+    --cal-weight 0.05 \
+    --cal-warmup-epochs 5 \
+    --cal-ramp-epochs 20 \
+    --prcc-ce-weight 0.3 \
+    --prcc-ce-final-weight 1.0 \
+    --prcc-ce-ramp-epochs 15 \
+    --cross-clothes-contrastive-weight 0.3 \
+    --contrastive-temperature 0.10 \
+    --use-prcc-sketch \
+    --rgb-sketch-consistency-weight 0.05 \
+    --sketch-warmup-epochs 5 \
+    --sketch-ramp-epochs 20 \
+    --freeze-backbone-epochs 10 \
+    --use-part-branch false \
+    --triplet-weight 1.0 \
+    --triplet-margin 0.3 \
+    --weight-decay 0.01 \
+    --pretrained-checkpoint outputs/transfer/expT_market_clip/best.pth \
+    --teacher-checkpoint outputs/transfer/expT_market_clip/best.pth \
+    --distill-weight 0.05 \
+    --distill-final-weight 0.02 \
+    --distill-ramp-epochs 10 \
+    --best-metric mAP \
+    --best-dataset prcc_dev \
+    --prcc-dev-identities 30 \
+    --prcc-dev-seed 42 \
+    --eval-period 2 \
+    --color-jitter-probability 0.5 \
+    --random-grayscale-probability 0.2 \
+    --output-dir outputs/transfer/expT4_clip_l

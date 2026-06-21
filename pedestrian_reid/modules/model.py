@@ -131,15 +131,16 @@ class GradientReverse(torch.autograd.Function):
 
 
 class PartFeatureBranch(nn.Module):
-    def __init__(self, num_parts: int, embedding_dim: int):
+    def __init__(self, num_parts: int, embedding_dim: int, in_channels: int = REID_FEATURE_DIM):
         super().__init__()
         if num_parts < MIN_PARTS:
             raise ValueError(f"num_parts must be >= {MIN_PARTS}, got {num_parts}")
         self.num_parts = num_parts
         self.embedding_dim = embedding_dim
+        self.in_channels = in_channels
         self.pool = nn.AdaptiveAvgPool2d((num_parts, 1))
         self.embeddings = nn.ModuleList(
-            nn.Linear(REID_FEATURE_DIM, embedding_dim, bias=False) for _ in range(num_parts)
+            nn.Linear(in_channels, embedding_dim, bias=False) for _ in range(num_parts)
         )
         self.bnnecks = nn.ModuleList(nn.BatchNorm1d(embedding_dim) for _ in range(num_parts))
 
@@ -186,6 +187,8 @@ class PedestrianReIDNet(nn.Module):
         num_market_classes: int = 0,
         num_prcc_classes: int = 0,
         use_domain_adversarial: bool = False,
+        backbone_type: str = 'resnet50_ibn',
+        backbone_pretrained: bool = True,
     ):
         super().__init__()
         _validate_combined_weights(combined_global_weight, combined_part_weight)
@@ -199,9 +202,21 @@ class PedestrianReIDNet(nn.Module):
         self.num_market_classes = num_market_classes
         self.num_prcc_classes = num_prcc_classes
         self.use_domain_adversarial = use_domain_adversarial
-        self.backbone = ResNet50IBNBackbone()
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.embedding = nn.Linear(REID_FEATURE_DIM, embedding_dim, bias=False)
+        self.backbone_type = backbone_type
+
+        # Dynamic backbone creation
+        from pedestrian_reid.modules.backbones import create_backbone
+        self.backbone = create_backbone(backbone_type, pretrained=backbone_pretrained)
+        backbone_dim = self.backbone.output_dim()
+
+        # Pooling layer depends on backbone output format
+        if self.backbone.output_format() == 'spatial':
+            self.pool = nn.AdaptiveAvgPool2d(1)
+        else:
+            # ViT already outputs CLS token, no pooling needed
+            self.pool = nn.Identity()
+
+        self.embedding = nn.Linear(backbone_dim, embedding_dim, bias=False)
         self.bnneck = nn.BatchNorm1d(embedding_dim)
         self.classifier = _identity_classifier(embedding_dim, num_market_classes if use_dual_classifier else num_classes)
         self.prcc_classifier = _identity_classifier(embedding_dim, num_prcc_classes) if use_dual_classifier else None
@@ -211,7 +226,15 @@ class PedestrianReIDNet(nn.Module):
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         feature_map = self.backbone(images)
-        pooled = self.pool(feature_map).flatten(1)
+
+        # Handle different backbone output formats
+        if self.backbone.output_format() == 'spatial':
+            # CNN backbone: [B, C, H, W]
+            pooled = self.pool(feature_map).flatten(1)
+        else:
+            # ViT backbone: [B, D] (already CLS token)
+            pooled = feature_map
+
         embedding = self.embedding(pooled)
         bn_features = self.bnneck(embedding)
         outputs = {
@@ -222,6 +245,7 @@ class PedestrianReIDNet(nn.Module):
         if self.prcc_classifier is not None:
             outputs["prcc_logits"] = self.prcc_classifier(bn_features)
         if self.part_branch is not None:
+            # Part branch only for CNN backbones
             part_features = self.part_branch(feature_map)
             outputs["part_features"] = part_features
             outputs["combined_features"] = _combined_features(
@@ -230,6 +254,9 @@ class PedestrianReIDNet(nn.Module):
                 global_weight=self.combined_global_weight,
                 part_weight=self.combined_part_weight,
             )
+        else:
+            # No part branch for ViT, use global features only
+            outputs["combined_features"] = outputs["bn_features"]
         if self.clothes_classifier is not None or self.domain_discriminator is not None:
             reversed_features = GradientReverse.apply(bn_features, GRAD_REVERSE_SCALE)
             if self.clothes_classifier is not None:
@@ -271,10 +298,10 @@ def _identity_classifier(embedding_dim: int, num_classes: int) -> nn.Linear | No
     return nn.Linear(embedding_dim, num_classes, bias=False)
 
 
-def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int) -> PartFeatureBranch | None:
+def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int, backbone_dim: int = REID_FEATURE_DIM) -> PartFeatureBranch | None:
     if not use_part_branch:
         return None
-    return PartFeatureBranch(num_parts, part_embedding_dim)
+    return PartFeatureBranch(num_parts, part_embedding_dim, in_channels=backbone_dim)
 
 
 def _combined_features(

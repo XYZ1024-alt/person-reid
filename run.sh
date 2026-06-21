@@ -191,9 +191,9 @@ train_expt4_joint_v1() {
     --batch-size "$BATCH_SIZE" \
     --num-workers "$NUM_WORKERS" \
     --lr 0.0001 \
-    --cal-weight 0 \
-    --cal-warmup-epochs 0 \
-    --cal-ramp-epochs 0 \
+    --cal-weight 0.05 \
+    --cal-warmup-epochs 5 \
+    --cal-ramp-epochs 15 \
     --sketch-loss-weight 0.1 \
     --rgb-sketch-consistency-weight 0.05 \
     --sketch-warmup-epochs 5 \
@@ -214,10 +214,10 @@ train_expt4_joint_v1() {
     --triplet-feature-key combined_features \
     --feature-key combined_features \
     --use-dual-classifier \
-    --domain-adversarial-weight 0.0 \
-    --prcc-ce-weight 0.0 \
+    --domain-adversarial-weight 0.1 \
+    --prcc-ce-weight 0.3 \
     --prcc-ce-final-weight 1.0 \
-    --prcc-ce-ramp-epochs 20 \
+    --prcc-ce-ramp-epochs 15 \
     --cross-clothes-contrastive-weight 0.3 \
     --contrastive-temperature 0.07 \
     --prcc-dev-identities "$PRCC_DEV_IDENTITIES" \
@@ -358,29 +358,31 @@ fi
 
 run_stage 5 train_model \
   --mode prcc \
-  --epochs 3 \
+  --epochs 8 \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
-  --lr 0.00001 \
-  --cal-weight 0 \
-  --cal-warmup-epochs 0 \
-  --cal-ramp-epochs 0 \
-  --no-use-prcc-sketch \
+  --lr 0.00002 \
+  --lr-scheduler cosine \
+  --cal-weight 0.03 \
+  --cal-warmup-epochs 1 \
+  --cal-ramp-epochs 1 \
+  --use-prcc-sketch \
   --sketch-loss-weight 0 \
-  --rgb-sketch-consistency-weight 0 \
+  --rgb-sketch-consistency-weight 0.1 \
   --sketch-warmup-epochs 0 \
-  --sketch-ramp-epochs 0 \
+  --sketch-ramp-epochs 2 \
   --use-part-branch \
   --num-parts 6 \
   --part-embedding-dim 256 \
   --part-triplet-weight 0.0 \
   --cloth-invariant-weight 0.0 \
-  --cross-clothes-contrastive-weight 0.3 \
+  --cross-clothes-contrastive-weight 0.5 \
+  --contrastive-temperature 0.10 \
   --combined-global-weight 0.7 \
   --combined-part-weight 0.3 \
   --teacher-checkpoint "$EXP4_FOR_EXP5/best.pth" \
-  --distill-weight 0.05 \
-  --distill-final-weight 0.05 \
+  --distill-weight 0.02 \
+  --distill-final-weight 0.02 \
   --distill-hold-epochs 0 \
   --distill-ramp-epochs 0 \
   --freeze-backbone-layers 'layer1,layer2,layer3' \
@@ -388,7 +390,7 @@ run_stage 5 train_model \
   --best-metric mAP \
   --best-variant standard \
   --eval-period 1 \
-  --lr-milestones 1,2 \
+  --lr-milestones 5,7 \
   --color-jitter-probability 0.5 \
   --random-grayscale-probability 0.1 \
   --dark-augment-probability 0.0 \

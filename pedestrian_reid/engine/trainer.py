@@ -337,7 +337,7 @@ def train_from_args(args: Namespace) -> None:
         model = build_model(dataset, args).to(device)
         teacher = initialize_teacher(args, device)
         pretrained_count = initialize_model_weights(model, args, distributed)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = build_optimizer(model, args)
         scheduler = build_lr_scheduler(optimizer, args)
         scaler = _build_grad_scaler(args, device)
         resume_state = load_checkpoint(args.resume, CheckpointTarget(model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler))
@@ -393,7 +393,43 @@ def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
         num_market_classes=dataset.num_market_classes,
         num_prcc_classes=dataset.num_prcc_classes,
         use_domain_adversarial=getattr(args, "use_domain_adversarial", False),
+        backbone_type=getattr(args, "backbone", "resnet50_ibn"),
+        backbone_pretrained=True,
     )
+
+
+def build_optimizer(model: PedestrianReIDNet, args: Namespace) -> torch.optim.Optimizer:
+    """
+    Build optimizer with optional grouped learning rates for Foundation Models.
+
+    For CLIP/EVA02 backbones, uses smaller learning rate for backbone and larger for heads.
+    For ResNet50-IBN, uses uniform learning rate.
+    """
+    backbone_type = getattr(args, "backbone", "resnet50_ibn")
+
+    # Use grouped learning rates for Foundation Models
+    if backbone_type in ['clip_vit_l', 'eva02_l'] and (args.backbone_lr is not None or args.head_lr is not None):
+        backbone_lr = args.backbone_lr if args.backbone_lr is not None else args.lr
+        head_lr = args.head_lr if args.head_lr is not None else args.lr
+
+        # Separate backbone and head parameters
+        backbone_params = []
+        head_params = []
+
+        for name, param in model.named_parameters():
+            if 'backbone' in name:
+                backbone_params.append(param)
+            else:
+                head_params.append(param)
+
+        param_groups = [
+            {'params': backbone_params, 'lr': backbone_lr},
+            {'params': head_params, 'lr': head_lr},
+        ]
+        return torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
+    else:
+        # Uniform learning rate for ResNet50-IBN
+        return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
 def initialize_teacher(args: Namespace, device: torch.device) -> torch.nn.Module | None:
@@ -470,8 +506,25 @@ def _build_grad_scaler(args: Namespace, device: torch.device):
 
 
 def build_lr_scheduler(optimizer: torch.optim.Optimizer, args: Namespace):
-    milestones = _lr_milestones(args.lr_milestones)
-    return torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=args.lr_gamma)
+    """
+    Build learning rate scheduler.
+
+    Supports:
+    - 'step': MultiStepLR (default)
+    - 'cosine': CosineAnnealingLR
+    """
+    scheduler_type = getattr(args, "lr_scheduler", "step")
+
+    if scheduler_type == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs,
+            eta_min=args.lr * 0.01  # Min LR is 1% of initial LR
+        )
+    else:
+        # Default: MultiStepLR
+        milestones = _lr_milestones(args.lr_milestones)
+        return torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=args.lr_gamma)
 
 
 def _lr_milestones(raw: str) -> list[int]:

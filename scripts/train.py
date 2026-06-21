@@ -88,6 +88,14 @@ PRECISION_FP32 = "fp32"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a pure PyTorch ReID model")
     parser.add_argument("--mode", choices=[MODE_MARKET, MODE_PRCC, MODE_JOINT], default=MODE_JOINT)
+    parser.add_argument("--backbone", choices=['resnet50_ibn', 'clip_vit_l', 'eva02_l'], default='resnet50_ibn',
+                        help='Backbone architecture: resnet50_ibn (default), clip_vit_l, eva02_l')
+    parser.add_argument("--backbone-lr", type=float, default=None,
+                        help='Learning rate for backbone (Foundation Models). If None, uses --lr')
+    parser.add_argument("--head-lr", type=float, default=None,
+                        help='Learning rate for classification heads. If None, uses --lr')
+    parser.add_argument("--lr-scheduler", choices=['step', 'cosine'], default='step',
+                        help='Learning rate scheduler: step (MultiStepLR) or cosine (CosineAnnealingLR)')
     parser.add_argument("--market-root", default=DEFAULT_MARKET_ROOT)
     parser.add_argument("--prcc-root", default=DEFAULT_PRCC_ROOT)
     parser.add_argument("--output-dir", default="outputs/pedestrian_reid")
