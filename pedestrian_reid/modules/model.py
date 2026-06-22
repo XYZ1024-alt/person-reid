@@ -203,8 +203,11 @@ class PedestrianReIDNet(nn.Module):
         self.backbone = create_backbone(backbone_type, pretrained=backbone_pretrained)
         backbone_dim = self.backbone.output_dim()
 
+        self.backbone_format = self.backbone.output_format()
+        _validate_part_branch_support(use_part_branch, self.backbone_format)
+
         # Pooling layer depends on backbone output format
-        if self.backbone.output_format() == 'spatial':
+        if self.backbone_format == 'spatial':
             self.pool = nn.AdaptiveAvgPool2d(1)
         else:
             # ViT already outputs CLS token, no pooling needed
@@ -235,25 +238,66 @@ class PedestrianReIDNet(nn.Module):
         self.part_branch = _part_branch(use_part_branch, num_parts, part_embedding_dim, backbone_dim)
         self.domain_discriminator = DomainDiscriminator(embedding_dim) if use_domain_adversarial else None
 
-    def forward(self, images: torch.Tensor, sketch_features: torch.Tensor | None = None, alpha: float = 1.0) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        images: torch.Tensor,
+        *,
+        sketch_images: torch.Tensor | None = None,
+        sketch_features: torch.Tensor | None = None,
+        alpha: float = 1.0,
+        return_sketch_outputs: bool = False,
+    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        if sketch_images is not None and sketch_features is not None:
+            raise ValueError("Pass either sketch_images or sketch_features, not both")
         feature_map = self.backbone(images)
-
-        # Handle different backbone output formats
-        if self.backbone.output_format() == 'spatial':
-            # CNN backbone: [B, C, H, W]
-            pooled = self.pool(feature_map).flatten(1)
-        else:
-            # ViT backbone: [B, D] (already CLS token)
-            pooled = feature_map
-
-        # Use ClothInvariantReIDHead for sketch fusion path
+        pooled = self._pool_backbone_output(feature_map)
         if self.use_sketch_fusion:
-            outputs = self.sketch_head(pooled, sketch_features, alpha=alpha)
-            # Part branch not supported with sketch fusion (ViT-only feature)
-            outputs["combined_features"] = outputs["bn_features"]
-            return outputs
+            return self._forward_sketch_fusion(
+                pooled,
+                sketch_images=sketch_images,
+                sketch_features=sketch_features,
+                alpha=alpha,
+                return_sketch_outputs=return_sketch_outputs,
+            )
+        return self._forward_standard(feature_map, pooled)
 
-        # Standard path (backward compatible)
+    def _pool_backbone_output(self, feature_map: torch.Tensor) -> torch.Tensor:
+        if self.backbone_format == 'spatial':
+            return self.pool(feature_map).flatten(1)
+        return feature_map
+
+    def _forward_sketch_fusion(
+        self,
+        pooled: torch.Tensor,
+        *,
+        sketch_images: torch.Tensor | None,
+        sketch_features: torch.Tensor | None,
+        alpha: float,
+        return_sketch_outputs: bool,
+    ):
+        paired_features = self._sketch_features(sketch_images, sketch_features)
+        outputs = self.sketch_head(pooled, paired_features, alpha=alpha)
+        outputs["combined_features"] = outputs["bn_features"]
+        if not return_sketch_outputs:
+            return outputs
+        if paired_features is None:
+            raise ValueError("return_sketch_outputs=True requires paired sketch inputs")
+        sketch_outputs = self.sketch_head(paired_features, None, alpha=alpha)
+        sketch_outputs["combined_features"] = sketch_outputs["bn_features"]
+        return outputs, sketch_outputs
+
+    def _sketch_features(
+        self,
+        sketch_images: torch.Tensor | None,
+        sketch_features: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if sketch_features is not None:
+            return sketch_features
+        if sketch_images is None:
+            return None
+        return self._pool_backbone_output(self.backbone(sketch_images))
+
+    def _forward_standard(self, feature_map: torch.Tensor, pooled: torch.Tensor) -> dict[str, torch.Tensor]:
         embedding = self.embedding(pooled)
         bn_features = self.bnneck(embedding)
         outputs = {
@@ -306,6 +350,11 @@ def _part_branch(use_part_branch: bool, num_parts: int, part_embedding_dim: int,
     if not use_part_branch:
         return None
     return PartFeatureBranch(num_parts, part_embedding_dim, in_channels=backbone_dim)
+
+
+def _validate_part_branch_support(use_part_branch: bool, backbone_format: str) -> None:
+    if use_part_branch and backbone_format != 'spatial':
+        raise ValueError("part branch requires a spatial backbone; CLIP/EVA backbones output sequence features")
 
 
 def _combined_features(

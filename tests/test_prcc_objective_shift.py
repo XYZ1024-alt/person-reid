@@ -101,6 +101,7 @@ def _contrastive_args() -> SimpleNamespace:
         cross_clothes_contrastive_weight=0.2,
         triplet_feature_key="combined_features",
         contrastive_temperature=0.07,
+        cross_clothes_hard_negative_weight=2.0,
     )
 
 

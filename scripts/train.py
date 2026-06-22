@@ -29,7 +29,6 @@ DEFAULT_TRIPLET_WEIGHT = 1.0
 DEFAULT_CAL_WEIGHT = 0.5
 DEFAULT_CAL_WARMUP_EPOCHS = 10
 DEFAULT_CAL_RAMP_EPOCHS = 10
-DEFAULT_PRCC_IDENTITIES_RATIO = 0.5
 DEFAULT_USE_PRCC_SKETCH = True
 DEFAULT_SKETCH_LOSS_WEIGHT = 0.5
 DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT = 0.2
@@ -48,7 +47,6 @@ DEFAULT_BEST_DATASET = "auto"
 DEFAULT_FEATURE_KEY = REID_FEATURE_KEY
 DEFAULT_TRIPLET_FEATURE_KEY = "features"
 DEFAULT_FREEZE_BACKBONE_EPOCHS = 0
-DEFAULT_FREEZE_BACKBONE_LAYERS = "stem,layer1,layer2"
 DEFAULT_USE_PART_BRANCH = False
 DEFAULT_PARTS = DEFAULT_NUM_PARTS
 DEFAULT_PART_EMBEDDING_DIM = PART_EMBEDDING_DIM
@@ -119,8 +117,6 @@ def parse_args() -> argparse.Namespace:
              "Phase 1: alpha=0 during warmup (no adversarial gradient). "
              "Phase 2: alpha ramps via Sigmoid curve from 0 to target weight."
     )
-    parser.add_argument("--prcc-identities-ratio", type=float, default=DEFAULT_PRCC_IDENTITIES_RATIO)
-    parser.add_argument("--disable-source-balanced-sampling", action="store_true")
     parser.add_argument("--use-prcc-sketch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PRCC_SKETCH)
     parser.add_argument("--sketch-loss-weight", type=float, default=DEFAULT_SKETCH_LOSS_WEIGHT)
     parser.add_argument("--rgb-sketch-consistency-weight", type=float, default=DEFAULT_RGB_SKETCH_CONSISTENCY_WEIGHT)
@@ -142,7 +138,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-dual-classifier", action="store_true", default=DEFAULT_USE_DUAL_CLASSIFIER)
     parser.add_argument("--domain-adversarial-weight", type=float, default=DEFAULT_DOMAIN_ADVERSARIAL_WEIGHT)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=DEFAULT_FREEZE_BACKBONE_EPOCHS)
-    parser.add_argument("--freeze-backbone-layers", default=DEFAULT_FREEZE_BACKBONE_LAYERS)
     parser.add_argument("--use-part-branch", action=argparse.BooleanOptionalAction, default=DEFAULT_USE_PART_BRANCH)
     parser.add_argument("--num-parts", type=int, default=DEFAULT_PARTS)
     parser.add_argument("--part-embedding-dim", type=int, default=DEFAULT_PART_EMBEDDING_DIM)

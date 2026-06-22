@@ -43,7 +43,8 @@ def main() -> None:
 
 
 def _available_feature_keys(model) -> list[str]:
-    return sorted(key for key in FEATURE_KEYS if key != COMBINED_FEATURE_KEY or model.use_part_branch)
+    has_combined = model.use_part_branch or getattr(model, "use_sketch_fusion", False)
+    return sorted(key for key in FEATURE_KEYS if key != COMBINED_FEATURE_KEY or has_combined)
 
 
 def print_checkpoint_metadata(checkpoint: dict) -> None:

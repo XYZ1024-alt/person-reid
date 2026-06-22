@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import random
+import subprocess
 
 import torch
 import torch.distributed as dist
@@ -104,6 +105,9 @@ AUGMENT_PROBABILITY_ARGS = (
 )
 
 MLFLOW_ARTIFACT_LOG_INTERVAL = 5
+BACKBONE_TRAINABILITY_ATTR = "_initial_backbone_trainability"
+MIN_HARD_NEGATIVE_WEIGHT = 0.0
+REQUIRED_CHECKPOINT_CONFIG_KEYS = ("backbone_type", "use_sketch_fusion")
 
 
 def _mlflow_enabled(args: Namespace) -> bool:
@@ -148,33 +152,19 @@ def _is_mlflow_scalar(value) -> bool:
 
 
 def _git_commit() -> str:
-    try:
-        import subprocess
-
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
-    except Exception:
-        return "unknown"
+    return _git_output(["git", "rev-parse", "--short", "HEAD"])
 
 
 def _git_is_dirty() -> bool:
-    try:
-        import subprocess
+    return bool(_git_output(["git", "status", "--porcelain"]))
 
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return bool(result.stdout.strip()) if result.returncode == 0 else False
-    except Exception:
-        return False
+
+def _git_output(command: list[str]) -> str:
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise RuntimeError(f"git metadata command failed: {' '.join(command)}: {stderr}")
+    return result.stdout.strip()
 
 
 def _mlflow_log_train_metrics(epoch: int, metrics: dict[str, float], distributed: DistributedContext) -> None:
@@ -211,10 +201,7 @@ def _mlflow_log_best_model(best_path: Path) -> None:
         return
     if mlflow.active_run() is None:
         return
-    try:
-        mlflow.log_artifact(str(best_path), artifact_path="checkpoints")
-    except Exception:
-        pass
+    mlflow.log_artifact(str(best_path), artifact_path="checkpoints")
 
 
 def _mlflow_log_source_artifacts() -> None:
@@ -226,10 +213,7 @@ def _mlflow_log_source_artifacts() -> None:
     for directory in source_dirs:
         path = Path(directory)
         if path.exists() and path.is_dir():
-            try:
-                mlflow.log_artifacts(str(path), artifact_path=f"code/{directory}")
-            except Exception:
-                pass
+            mlflow.log_artifacts(str(path), artifact_path=f"code/{directory}")
 
 
 @dataclass(frozen=True)
@@ -335,6 +319,7 @@ def train_from_args(args: Namespace) -> None:
         model = build_model(dataset, args).to(device)
         teacher = initialize_teacher(args, device)
         pretrained_count = initialize_model_weights(model, args, distributed)
+        record_initial_backbone_trainability(model)
         optimizer = build_optimizer(model, args)
         scheduler = build_lr_scheduler(optimizer, args)
         scaler = _build_grad_scaler(args, device)
@@ -446,6 +431,7 @@ def initialize_teacher(args: Namespace, device: torch.device) -> torch.nn.Module
 
 def load_compatible_pretrained_checkpoint(model: PedestrianReIDNet, path: str, distributed: DistributedContext) -> int:
     checkpoint = torch.load(path, map_location="cpu")
+    _validate_pretrained_checkpoint_architecture(checkpoint, path, model)
     source = checkpoint["model"]
     target = model.state_dict()
     selected, skipped = _compatible_pretrained_state(source, target)
@@ -483,6 +469,25 @@ def _compatible_pretrained_state(
             continue
         skipped.append(clean_key)
     return selected, skipped
+
+
+def _validate_pretrained_checkpoint_architecture(checkpoint: dict, path: str, model: PedestrianReIDNet) -> None:
+    config = _required_checkpoint_model_config(checkpoint, path)
+    expected_backbone = str(getattr(model, "backbone_type", ""))
+    if config["backbone_type"] != expected_backbone:
+        raise ValueError(
+            f"Pretrained checkpoint backbone mismatch: {config['backbone_type']} != {expected_backbone}"
+        )
+
+
+def _required_checkpoint_model_config(checkpoint: dict, path: str) -> dict:
+    config = checkpoint.get("model_config")
+    if not isinstance(config, dict):
+        raise ValueError(f"Checkpoint missing model_config: {path}")
+    missing = [key for key in REQUIRED_CHECKPOINT_CONFIG_KEYS if key not in config]
+    if missing:
+        raise ValueError(f"Checkpoint missing required model_config keys {missing}: {path}")
+    return config
 
 
 def _build_sketch_head_key_mapping(target: dict[str, torch.Tensor]) -> dict[str, str]:
@@ -663,56 +668,44 @@ def _backbone_freeze_is_active(args: Namespace) -> bool:
 
 
 def configure_backbone_freeze(model, args: Namespace, epoch: int, *, distributed: DistributedContext) -> None:
-    layers = _active_freeze_layers(args)
-    if not layers:
+    if not _backbone_freeze_is_active(args):
         return
     freeze = args.freeze_backbone_all_epochs or epoch < args.freeze_backbone_epochs
     base_model = _unwrap_model(model)
-    changed = _set_backbone_layers_trainable(base_model, layers, not freeze)
-    _set_frozen_backbone_layers_eval(base_model, layers, freeze)
+    changed = _set_backbone_trainability(base_model, freeze)
+    _set_frozen_backbone_eval(base_model, freeze)
     if changed:
         action = "frozen" if freeze else "unfrozen"
-        rank_zero_print(distributed, f"backbone_layers_{action}={','.join(layers)} epoch={epoch + 1}")
+        rank_zero_print(distributed, f"backbone_{action}=true epoch={epoch + 1}")
 
 
-def _is_resnet_backbone(backbone) -> bool:
-    """Check if backbone is ResNet (always False - ResNet support removed)."""
-    return False
+def record_initial_backbone_trainability(model) -> None:
+    base_model = _unwrap_model(model)
+    state = {name: parameter.requires_grad for name, parameter in base_model.backbone.named_parameters()}
+    setattr(base_model, BACKBONE_TRAINABILITY_ATTR, state)
 
 
-def _set_backbone_layers_trainable(model, layer_names: list[str], trainable: bool) -> int:
-    # Skip for non-ResNet backbones (CLIP, EVA02, etc.)
-    if not _is_resnet_backbone(model.backbone):
-        return 0
-
+def _set_backbone_trainability(model, freeze: bool) -> int:
+    initial_state = _initial_backbone_trainability(model)
     changed = 0
-    for layer_name in layer_names:
-        if hasattr(model.backbone, layer_name):
-            for parameter in getattr(model.backbone, layer_name).parameters():
-                changed += int(parameter.requires_grad != trainable)
-                parameter.requires_grad = trainable
+    for name, parameter in model.backbone.named_parameters():
+        target = False if freeze else initial_state[name]
+        changed += int(parameter.requires_grad != target)
+        parameter.requires_grad = target
     return changed
 
 
-def _set_frozen_backbone_layers_eval(model, layer_names: list[str], freeze: bool) -> None:
+def _initial_backbone_trainability(model) -> dict[str, bool]:
+    state = getattr(model, BACKBONE_TRAINABILITY_ATTR, None)
+    if state is None:
+        raise RuntimeError("Initial backbone trainability was not recorded")
+    return state
+
+
+def _set_frozen_backbone_eval(model, freeze: bool) -> None:
     if not freeze:
         return
-    # Skip for non-ResNet backbones (CLIP, EVA02, etc.)
-    if not _is_resnet_backbone(model.backbone):
-        return
-
-    for layer_name in layer_names:
-        if hasattr(model.backbone, layer_name):
-            getattr(model.backbone, layer_name).eval()
-
-
-def _freeze_backbone_layers(args: Namespace) -> list[str]:
-    return [name.strip() for name in args.freeze_backbone_layers.split(",") if name.strip()]
-
-
-def _active_freeze_layers(args: Namespace) -> list[str]:
-    """Return list of layers to freeze (empty for Foundation Models)."""
-    return []
+    model.backbone.eval()
 
 
 def train_one_epoch(
@@ -826,14 +819,7 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
         raise ValueError("cal_ramp_epochs must be >= 0")
     if args.precision == PRECISION_FP16 and not args.device.startswith(CUDA_DEVICE_TYPE):
         raise ValueError("fp16 precision requires a CUDA device")
-    if args.sketch_loss_weight < 0:
-        raise ValueError("sketch_loss_weight must be >= 0")
-    if args.rgb_sketch_consistency_weight < 0:
-        raise ValueError("rgb_sketch_consistency_weight must be >= 0")
-    if args.part_triplet_weight < 0:
-        raise ValueError("part_triplet_weight must be >= 0")
-    if args.cloth_invariant_weight < 0:
-        raise ValueError("cloth_invariant_weight must be >= 0")
+    _validate_loss_weight_args(args)
     if args.num_parts < MIN_PARTS:
         raise ValueError(f"num_parts must be >= {MIN_PARTS}")
     if args.part_embedding_dim <= 0:
@@ -842,10 +828,11 @@ def validate_training_args(args: Namespace, distributed: DistributedContext) -> 
     if args.part_triplet_weight > NO_PART_LOSS and not args.use_part_branch:
         raise ValueError("part_triplet_weight requires --use-part-branch")
     if args.cloth_invariant_weight > NO_CLOTH_INVARIANT_LOSS and args.mode == MODE_MARKET:
-        raise ValueError("cloth_invariant_weight requires PRCC or joint mode")
+        raise ValueError("cloth_invariant_weight requires PRCC mode")
     _validate_objective_shift_args(args)
     _validate_distill_args(args)
     _validate_feature_key_args(args)
+    _validate_part_branch_args(args)
     _validate_dual_classifier_args(args)
     _validate_domain_adversarial_args(args)
     if args.sketch_warmup_epochs < 0:
@@ -878,6 +865,17 @@ def _validate_combined_weight_args(args: Namespace) -> None:
         raise ValueError("at least one combined feature weight must be > 0")
 
 
+def _validate_loss_weight_args(args: Namespace) -> None:
+    if args.sketch_loss_weight < 0:
+        raise ValueError("sketch_loss_weight must be >= 0")
+    if args.rgb_sketch_consistency_weight < 0:
+        raise ValueError("rgb_sketch_consistency_weight must be >= 0")
+    if args.part_triplet_weight < 0:
+        raise ValueError("part_triplet_weight must be >= 0")
+    if args.cloth_invariant_weight < 0:
+        raise ValueError("cloth_invariant_weight must be >= 0")
+
+
 def _validate_objective_shift_args(args: Namespace) -> None:
     if args.prcc_dev_identities < NO_PRCC_DEV_IDENTITIES:
         raise ValueError("prcc_dev_identities must be >= 0")
@@ -890,30 +888,38 @@ def _validate_objective_shift_args(args: Namespace) -> None:
     if args.cross_clothes_contrastive_weight < NO_CROSS_CLOTHES_CONTRASTIVE_LOSS:
         raise ValueError("cross_clothes_contrastive_weight must be >= 0")
     if args.cross_clothes_contrastive_weight > NO_CROSS_CLOTHES_CONTRASTIVE_LOSS and args.mode == MODE_MARKET:
-        raise ValueError("cross_clothes_contrastive_weight requires PRCC or joint mode")
+        raise ValueError("cross_clothes_contrastive_weight requires PRCC mode")
     if args.contrastive_temperature <= MIN_CONTRASTIVE_TEMPERATURE:
         raise ValueError("contrastive_temperature must be > 0")
+    if args.cross_clothes_hard_negative_weight <= MIN_HARD_NEGATIVE_WEIGHT:
+        raise ValueError("cross_clothes_hard_negative_weight must be > 0")
 
 
 def _validate_feature_key_args(args: Namespace) -> None:
-    _validate_feature_key_string(args.feature_key, args.use_part_branch, "feature_key")
-    _validate_feature_key_string(args.triplet_feature_key, args.use_part_branch, "triplet_feature_key")
+    allow_combined = args.use_part_branch or getattr(args, "use_sketch_fusion", False)
+    _validate_feature_key_string(args.feature_key, allow_combined, "feature_key")
+    _validate_feature_key_string(args.triplet_feature_key, allow_combined, "triplet_feature_key")
 
 
-def _validate_feature_key_string(feature_key: str, use_part_branch: bool, name: str) -> None:
+def _validate_feature_key_string(feature_key: str, allow_combined: bool, name: str) -> None:
     keys = [key.strip() for key in feature_key.split(",")]
     for key in keys:
         if key not in FEATURE_KEYS:
             raise ValueError(f"{name} must be one of {sorted(FEATURE_KEYS)}, got {key}")
-    if COMBINED_FEATURE_KEY in keys and not use_part_branch:
-        raise ValueError(f"{name} includes combined_features which requires --use-part-branch")
+    if COMBINED_FEATURE_KEY in keys and not allow_combined:
+        raise ValueError(f"{name} includes combined_features but no combined feature branch is enabled")
+
+
+def _validate_part_branch_args(args: Namespace) -> None:
+    if not args.use_part_branch:
+        return
+    raise ValueError("use_part_branch requires a spatial backbone; CLIP/EVA backbones output sequence features")
 
 
 def _validate_dual_classifier_args(args: Namespace) -> None:
     if not getattr(args, "use_dual_classifier", False):
         return
-    # Dual classifier deprecated with MODE_JOINT removal
-    raise ValueError("--use-dual-classifier is deprecated (MODE_JOINT was removed)")
+    raise ValueError("--use-dual-classifier is unsupported by the current market/prcc modes")
 
 
 def _validate_domain_adversarial_args(args: Namespace) -> None:
@@ -928,7 +934,7 @@ def _validate_best_dataset_args(args: Namespace) -> None:
     if args.best_dataset not in BEST_DATASET_CHOICES:
         raise ValueError(f"best_dataset must be one of {sorted(BEST_DATASET_CHOICES)}, got {args.best_dataset}")
     if args.mode == MODE_MARKET and args.prcc_dev_identities > NO_PRCC_DEV_IDENTITIES:
-        raise ValueError("prcc_dev_identities requires PRCC or joint mode")
+        raise ValueError("prcc_dev_identities requires PRCC mode")
     if args.best_dataset == MODE_PRCC_DEV and args.prcc_dev_identities <= NO_PRCC_DEV_IDENTITIES:
         raise ValueError("best_dataset=prcc_dev requires --prcc-dev-identities > 0")
     if args.mode == MODE_MARKET and args.best_dataset in {MODE_PRCC, MODE_PRCC_DEV}:
@@ -966,7 +972,7 @@ def _validate_freeze_args(args: Namespace) -> None:
 
     backbone_type = getattr(args, "backbone", "clip_vit_l")
     if args.freeze_backbone_epochs > 0:
-        print(f"Note: Backbone freezing for {backbone_type} applies to entire model, not per-layer")
+        print(f"Note: Backbone freezing for {backbone_type} applies to the entire backbone")
 
 
 def save_checkpoint(path: Path, request: CheckpointSaveRequest) -> None:
@@ -987,6 +993,7 @@ def load_checkpoint(path: str, target: CheckpointTarget) -> CheckpointResumeStat
     if not path:
         return CheckpointResumeState()
     checkpoint = torch.load(path, map_location="cpu")
+    _validate_resume_checkpoint_architecture(checkpoint, path, target.model)
     target.model.load_state_dict(checkpoint["model"])
     target.optimizer.load_state_dict(checkpoint["optimizer"])
     target.scheduler.load_state_dict(checkpoint["scheduler"])
@@ -996,6 +1003,21 @@ def load_checkpoint(path: str, target: CheckpointTarget) -> CheckpointResumeStat
         start_epoch=int(checkpoint["epoch"]) + 1,
         best_metric_value=float(checkpoint["best_metric_value"]),
     )
+
+
+def _validate_resume_checkpoint_architecture(checkpoint: dict, path: str, model: torch.nn.Module) -> None:
+    config = _required_checkpoint_model_config(checkpoint, path)
+    base_model = _unwrap_model(model)
+    expected = {
+        "backbone_type": str(getattr(base_model, "backbone_type", "")),
+        "use_sketch_fusion": bool(getattr(base_model, "use_sketch_fusion", False)),
+    }
+    actual = {
+        "backbone_type": str(config["backbone_type"]),
+        "use_sketch_fusion": bool(config["use_sketch_fusion"]),
+    }
+    if actual != expected:
+        raise ValueError(f"Resume checkpoint architecture mismatch: {actual} != {expected}")
 
 
 def run_training(run: TrainingRun) -> None:
@@ -1174,27 +1196,25 @@ def _build_sketch_context(model, batch, labels: torch.Tensor, has_sketch: torch.
     rgb_mask = has_sketch.to(device, non_blocking=args.pin_memory)
     sketch_images = batch["sketch_image"][has_sketch].to(device, non_blocking=args.pin_memory)
     sketch_labels = labels[has_sketch].to(device, non_blocking=args.pin_memory)
-    if args.sketch_loss_weight > NO_SKETCH_LOSS:
+    if args.sketch_loss_weight > NO_SKETCH_LOSS or _model_uses_sketch_fusion(model):
         return SketchContext(True, sketch_images, sketch_labels, rgb_mask)
     targets = _extract_sketch_targets(model, sketch_images, device, args)["features"].detach()
     return SketchContext(True, sketch_images, sketch_labels, rgb_mask, targets)
 
 
 def _forward_training_paths(model, images: torch.Tensor, sketch_context: SketchContext, device, args, alpha: float = 1.0):
-    # New sketch fusion path: extract RGB and sketch features separately
-    if hasattr(model, 'use_sketch_fusion') and model.use_sketch_fusion:
+    if _model_uses_sketch_fusion(model):
+        if sketch_context.enabled:
+            _require_one_to_one_sketch_batch(sketch_context, images)
         with _autocast_context(args, device):
-            # Extract sketch CLIP features if available
-            sketch_features = None
-            if sketch_context.enabled and sketch_context.images is not None:
-                sketch_features = model.backbone(sketch_context.images)
-
-            # Forward through model with sketch fusion and temporal alpha
-            # Model will extract RGB features internally via backbone
-            outputs = model.forward(images, sketch_features=sketch_features, alpha=alpha)
-
-        # No separate sketch outputs with fusion approach
-        return outputs, None
+            if sketch_context.enabled:
+                return model(
+                    images,
+                    sketch_images=sketch_context.images,
+                    alpha=alpha,
+                    return_sketch_outputs=True,
+                )
+            return model(images, alpha=alpha), None
 
     # Legacy concatenation path (backward compatible)
     if not sketch_context.enabled or args.sketch_loss_weight <= NO_SKETCH_LOSS:
@@ -1211,6 +1231,17 @@ def _split_outputs(outputs: dict[str, torch.Tensor], first_count: int):
     first = {key: value[:first_count] for key, value in outputs.items()}
     second = {key: value[first_count:] for key, value in outputs.items()}
     return first, second
+
+
+def _model_uses_sketch_fusion(model) -> bool:
+    return bool(getattr(_unwrap_model(model), "use_sketch_fusion", False))
+
+
+def _require_one_to_one_sketch_batch(sketch_context: SketchContext, images: torch.Tensor) -> None:
+    if sketch_context.rgb_mask is None or not bool(sketch_context.rgb_mask.all().item()):
+        raise ValueError("sketch fusion requires one sketch image for every RGB sample in the batch")
+    if sketch_context.images is None or sketch_context.images.size(0) != images.size(0):
+        raise ValueError("sketch fusion RGB/sketch batch sizes must match")
 
 
 def _sketch_losses(sketch_context: SketchContext, rgb_outputs, sketch_outputs, device, args, consistency_weight: float):
@@ -1345,24 +1376,36 @@ def _cross_clothes_contrastive_loss(outputs, labels: torch.Tensor, clothes_label
     valid = _source_mask(sources, device) & clothes_labels.ge(0)
     if not valid.any().item():
         raise ValueError("cross-clothes contrastive loss requires PRCC samples with known clothes labels")
-    return _supervised_cross_clothes_contrastive(features[valid], labels[valid], clothes_labels[valid], args.contrastive_temperature)
+    return _supervised_cross_clothes_contrastive(
+        features=features[valid],
+        labels=labels[valid],
+        clothes_labels=clothes_labels[valid],
+        temperature=args.contrastive_temperature,
+        hard_negative_weight=args.cross_clothes_hard_negative_weight,
+    )
 
 
 def _supervised_cross_clothes_contrastive(
+    *,
     features: torch.Tensor,
     labels: torch.Tensor,
     clothes_labels: torch.Tensor,
     temperature: float,
+    hard_negative_weight: float,
 ) -> torch.Tensor:
     similarities = _pairwise_cosine(features) / temperature
     same_identity = labels.unsqueeze(0).eq(labels.unsqueeze(1))
+    same_clothes = clothes_labels.unsqueeze(0).eq(clothes_labels.unsqueeze(1))
     different_clothes = clothes_labels.unsqueeze(0).ne(clothes_labels.unsqueeze(1))
     positive_mask = same_identity & different_clothes
+    hard_negative_mask = ~same_identity & same_clothes
     denominator_mask = positive_mask | ~same_identity
     positive_rows = positive_mask.any(dim=1)
     if not positive_rows.any().item():
         raise ValueError("cross-clothes contrastive loss found no positive cross-clothes pairs")
-    log_prob = similarities - similarities.masked_fill(~denominator_mask, float("-inf")).logsumexp(dim=1, keepdim=True)
+    weighted = similarities.clone()
+    weighted[hard_negative_mask] = weighted[hard_negative_mask] * hard_negative_weight
+    log_prob = weighted - weighted.masked_fill(~denominator_mask, float("-inf")).logsumexp(dim=1, keepdim=True)
     positive_count = positive_mask.sum(dim=1).clamp(min=MIN_POSITIVE_COUNT)
     positive_log_prob = (log_prob * positive_mask.float()).sum(dim=1) / positive_count
     return -positive_log_prob[positive_rows].mean()
@@ -1784,7 +1827,7 @@ def _checkpoint_metadata(request: CheckpointSaveRequest) -> dict[str, int | floa
     }
 
 
-def _model_config(model) -> dict[str, int | float | bool]:
+def _model_config(model) -> dict[str, int | float | bool | str]:
     return {
         "embedding_dim": int(model.embedding_dim),
         "use_part_branch": bool(model.use_part_branch),
@@ -1794,6 +1837,8 @@ def _model_config(model) -> dict[str, int | float | bool]:
         "combined_part_weight": float(model.combined_part_weight),
         "use_dual_classifier": bool(getattr(model, "use_dual_classifier", False)),
         "use_domain_adversarial": bool(getattr(model, "use_domain_adversarial", False)),
+        "backbone_type": str(getattr(model, "backbone_type", "unknown")),
+        "use_sketch_fusion": bool(getattr(model, "use_sketch_fusion", False)),
     }
 
 
@@ -1817,7 +1862,7 @@ def _print_epoch(epoch: int, metrics: dict[str, float]) -> None:
 
 def _require_cal_labels(num_clothes_classes: int, cal_weight: float) -> None:
     if cal_weight > NO_CAL_LOSS and num_clothes_classes <= 0:
-        raise ValueError("CAL requires clothes labels; use PRCC or joint mode, or set --cal-weight 0")
+        raise ValueError("CAL requires clothes labels; use PRCC mode, or set --cal-weight 0")
 
 
 def _effective_cal_weight(args: Namespace, epoch: int) -> float:
@@ -1909,6 +1954,8 @@ def _loader_has_persistent_workers(loader) -> bool:
 def _training_header(args: Namespace, loader, distributed: DistributedContext) -> str:
     parts = [
         f"precision={args.precision}",
+        f"backbone={getattr(args, 'backbone', 'clip_vit_l')}",
+        f"use_sketch_fusion={getattr(args, 'use_sketch_fusion', False)}",
         f"lr={scheduler_lrs(args.lr)}",
         f"lr_milestones={args.lr_milestones}",
         f"lr_gamma={args.lr_gamma}",
@@ -1935,11 +1982,11 @@ def _training_header(args: Namespace, loader, distributed: DistributedContext) -
         f"prcc_ce_ramp_epochs={args.prcc_ce_ramp_epochs}",
         f"cross_clothes_contrastive_weight={args.cross_clothes_contrastive_weight}",
         f"contrastive_temperature={args.contrastive_temperature}",
+        f"cross_clothes_hard_negative_weight={args.cross_clothes_hard_negative_weight}",
         f"tensorboard={args.tensorboard}",
         f"tensorboard_dir={_tensorboard_log_dir(args, Path(args.output_dir))}",
         f"eval_period={args.eval_period}",
         f"freeze_backbone_epochs={args.freeze_backbone_epochs}",
-        f"freeze_backbone_layers={args.freeze_backbone_layers}",
         f"freeze_backbone_all_epochs={args.freeze_backbone_all_epochs}",
         f"use_dual_classifier={getattr(args, 'use_dual_classifier', False)}",
         f"domain_adversarial_weight={getattr(args, 'domain_adversarial_weight', 0.0)}",

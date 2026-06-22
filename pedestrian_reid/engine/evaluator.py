@@ -19,6 +19,9 @@ from pedestrian_reid.modules.model import (
 )
 
 
+REQUIRED_MODEL_CONFIG_KEYS = ("backbone_type", "use_sketch_fusion")
+
+
 @dataclass(frozen=True)
 class EvalJob:
     name: str
@@ -99,7 +102,7 @@ def _checkpoint_protocol(dataset: str) -> str:
 
 def load_model(checkpoint_path: str, device: torch.device) -> PedestrianReIDNet:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model_config = checkpoint.get("model_config", {})
+    model_config = _checkpoint_model_config(checkpoint, checkpoint_path)
     model = PedestrianReIDNet(
         int(checkpoint["num_classes"]),
         embedding_dim=int(model_config.get("embedding_dim", EMBEDDING_DIM)),
@@ -113,10 +116,22 @@ def load_model(checkpoint_path: str, device: torch.device) -> PedestrianReIDNet:
         num_market_classes=int(checkpoint.get("num_market_classes", 0)),
         num_prcc_classes=int(checkpoint.get("num_prcc_classes", 0)),
         use_domain_adversarial=bool(model_config.get("use_domain_adversarial", False)),
+        backbone_type=str(model_config["backbone_type"]),
+        use_sketch_fusion=bool(model_config["use_sketch_fusion"]),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
     return model
+
+
+def _checkpoint_model_config(checkpoint: dict, checkpoint_path: str) -> dict:
+    model_config = checkpoint.get("model_config")
+    if not isinstance(model_config, dict):
+        raise ValueError(f"Checkpoint missing model_config: {checkpoint_path}")
+    missing = [key for key in REQUIRED_MODEL_CONFIG_KEYS if key not in model_config]
+    if missing:
+        raise ValueError(f"Checkpoint missing required model_config keys {missing}: {checkpoint_path}")
+    return model_config
 
 
 def print_metrics(metrics: dict[str, dict[str, float]], prefix: str = "") -> None:
