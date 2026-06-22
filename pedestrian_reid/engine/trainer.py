@@ -466,13 +466,34 @@ def _compatible_pretrained_state(
 ) -> tuple[dict[str, torch.Tensor], list[str]]:
     selected = {}
     skipped = []
+
+    # Build mapping from Stage 1 head keys to Stage 3 sketch_head keys
+    head_to_sketch_head = _build_sketch_head_key_mapping(target)
+
     for key, value in source.items():
         clean_key = _strip_module_prefix(key)
+        # Direct match
         if clean_key in target and target[clean_key].shape == value.shape:
             selected[clean_key] = value
             continue
+        # Try mapping head keys to sketch_head keys
+        mapped_key = head_to_sketch_head.get(clean_key)
+        if mapped_key and mapped_key in target and target[mapped_key].shape == value.shape:
+            selected[mapped_key] = value
+            continue
         skipped.append(clean_key)
     return selected, skipped
+
+
+def _build_sketch_head_key_mapping(target: dict[str, torch.Tensor]) -> dict[str, str]:
+    """Map standard head keys (Stage 1) to sketch_head keys (Stage 3)."""
+    mapping = {}
+    for key in target:
+        if key.startswith("sketch_head."):
+            # sketch_head.embedding.weight → embedding.weight
+            original_key = key.removeprefix("sketch_head.")
+            mapping[original_key] = key
+    return mapping
 
 
 def _strip_module_prefix(key: str) -> str:
@@ -486,7 +507,7 @@ def _count_head_parameters(source: dict[str, torch.Tensor]) -> int:
 
 
 def _is_head_key(key: str) -> bool:
-    return key.startswith(("classifier.", "prcc_classifier.", "clothes_classifier.", "domain_discriminator."))
+    return key.startswith(("classifier.", "prcc_classifier.", "clothes_classifier.", "domain_discriminator.", "sketch_head."))
 
 
 def _print_skipped_pretrained_parameters(distributed: DistributedContext, skipped: list[str]) -> None:
@@ -891,16 +912,16 @@ def _validate_feature_key_string(feature_key: str, use_part_branch: bool, name: 
 def _validate_dual_classifier_args(args: Namespace) -> None:
     if not getattr(args, "use_dual_classifier", False):
         return
-    if args.mode != MODE_JOINT:
-        raise ValueError("--use-dual-classifier requires joint mode")
+    # Dual classifier deprecated with MODE_JOINT removal
+    raise ValueError("--use-dual-classifier is deprecated (MODE_JOINT was removed)")
 
 
 def _validate_domain_adversarial_args(args: Namespace) -> None:
     weight = getattr(args, "domain_adversarial_weight", 0.0)
     if weight < 0:
         raise ValueError("domain_adversarial_weight must be >= 0")
-    if weight > 0 and args.mode not in {MODE_JOINT, MODE_PRCC}:
-        raise ValueError("domain_adversarial_weight requires joint or prcc mode")
+    if weight > 0 and args.mode != MODE_PRCC:
+        raise ValueError("domain_adversarial_weight requires prcc mode")
 
 
 def _validate_best_dataset_args(args: Namespace) -> None:
@@ -1193,7 +1214,7 @@ def _split_outputs(outputs: dict[str, torch.Tensor], first_count: int):
 
 
 def _sketch_losses(sketch_context: SketchContext, rgb_outputs, sketch_outputs, device, args, consistency_weight: float):
-    if not sketch_context.enabled:
+    if not sketch_context.enabled or sketch_outputs is None:
         return _zero_loss(device), _zero_loss(device)
     sketch_loss = _sketch_identity_loss(sketch_outputs, sketch_context.labels, device, args)
     consistency = _sketch_consistency_loss(sketch_context, rgb_outputs["features"], sketch_outputs, device, consistency_weight)
