@@ -4,7 +4,7 @@ import argparse
 
 import torch
 
-from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV
+from pedestrian_reid.builders import MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.engine.trainer import train_from_args
 from pedestrian_reid.modules.metrics import FEATURE_KEYS, REID_FEATURE_KEY
