@@ -70,7 +70,7 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
     --triplet-weight 1.0 \
     --triplet-margin 0.3 \
     --weight-decay 0.01 \
-    --freeze-backbone-epochs 10 \
+    --freeze-backbone-epochs 0 \
     --pretrained-checkpoint "" \
     --teacher-checkpoint "" \
     --distill-weight 0 \
