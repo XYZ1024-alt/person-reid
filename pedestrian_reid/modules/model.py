@@ -99,6 +99,12 @@ class ClothInvariantReIDHead(nn.Module):
             batch_first=True,
         )
 
+        # Learnable scalar gating the cross-attention residual.
+        # Initialized small (0.1) so lightweight sketch features do not
+        # overwhelm the pretrained CLIP semantic manifold early in training.
+        # The model can learn to increase this as it stabilizes.
+        self.sketch_fusion_weight = nn.Parameter(torch.tensor(0.1))
+
         # ReID retrieval branch
         self.embedding = nn.Linear(clip_dim, embedding_dim, bias=False)
         self.bnneck = nn.BatchNorm1d(embedding_dim)
@@ -137,8 +143,10 @@ class ClothInvariantReIDHead(nn.Module):
             # Cross-attention: inject structural geometry
             attn_out, _ = self.sketch_fusion(q, k, v)
 
-            # Residual connection: preserve CLIP manifold alignment
-            feat_fused = x_clip + attn_out.squeeze(1)
+            # Gated residual: small initial weight (0.1) prevents sketch
+            # features from disrupting the CLIP semantic manifold; the gate
+            # is learnable so the model can increase it as training stabilizes.
+            feat_fused = x_clip + self.sketch_fusion_weight * attn_out.squeeze(1)
         else:
             feat_fused = x_clip
 
