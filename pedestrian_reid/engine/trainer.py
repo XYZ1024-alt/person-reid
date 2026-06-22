@@ -1403,8 +1403,15 @@ def _supervised_cross_clothes_contrastive(
     positive_rows = positive_mask.any(dim=1)
     if not positive_rows.any().item():
         raise ValueError("cross-clothes contrastive loss found no positive cross-clothes pairs")
+    # Apply hard-negative weighting in log-space so the penalty is a true
+    # multiplicative factor on the softmax probability (w * exp(sim/T)),
+    # not a similarity scaler (exp(w * sim/T)) whose effect flips when
+    # similarities are negative.  Adding log(w) to the logit gives
+    # exp(sim/T + log(w)) = w * exp(sim/T), guaranteeing a consistent
+    # w-times contribution to the denominator regardless of sign(sim).
+    import math
     weighted = similarities.clone()
-    weighted[hard_negative_mask] = weighted[hard_negative_mask] * hard_negative_weight
+    weighted[hard_negative_mask] = weighted[hard_negative_mask] + math.log(hard_negative_weight)
     log_prob = weighted - weighted.masked_fill(~denominator_mask, float("-inf")).logsumexp(dim=1, keepdim=True)
     positive_count = positive_mask.sum(dim=1).clamp(min=MIN_POSITIVE_COUNT)
     positive_log_prob = (log_prob * positive_mask.float()).sum(dim=1) / positive_count
