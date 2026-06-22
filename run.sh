@@ -118,12 +118,18 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
 fi
 
 # ============================================================================
-# 阶段2：CLIP Joint训练（Market + PRCC）
+# 阶段2：SKIPPED - Direct transfer from Stage 1 to Stage 3
+# ============================================================================
+# Joint training (Market + PRCC) removed due to catastrophic forgetting.
+# PRCC mAP consistently dropped from 0.70 to 0.49 despite tuning.
+# Root cause: Market-1501's 10:1 data volume dominance.
+# Solution: Skip Stage 2, leverage CLIP's robust pre-trained features directly.
 # ============================================================================
 
-if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
+if false; then
+  # Stage 2 code preserved for reference but disabled
   echo "============================================================================"
-  echo "阶段2：CLIP Joint训练（Market + PRCC）"
+  echo "阶段2：CLIP Joint训练（Market + PRCC）- DEPRECATED"
   echo "============================================================================"
 
   $PYTHON scripts/train.py \
@@ -204,12 +210,12 @@ if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
 fi
 
 # ============================================================================
-# 阶段3：CLIP PRCC微调
+# 阶段3：CLIP PRCC微调 (Direct Transfer from Stage 1)
 # ============================================================================
 
 if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
   echo "============================================================================"
-  echo "阶段3：CLIP PRCC微调"
+  echo "阶段3：CLIP PRCC微调 (Direct Stage 1→3 Transfer)"
   echo "============================================================================"
 
   $PYTHON scripts/train.py \
@@ -217,31 +223,32 @@ if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
     --backbone-lr ${BACKBONE_LR_STAGE3} \
     --head-lr ${HEAD_LR_STAGE3} \
     --mode prcc \
-    --epochs 12 \
+    --epochs 30 \
     --batch-size ${BATCH_SIZE} \
     --lr-scheduler cosine \
     --prcc-root prcc \
+    --use-sketch-fusion \
     --cal-weight 0.03 \
-    --cal-warmup-epochs 1 \
+    --cal-warmup-epochs 10 \
+    --cal-sigmoid-ramp \
     --use-prcc-sketch \
     --rgb-sketch-consistency-weight 0.1 \
     --sketch-warmup-epochs 0 \
-    --sketch-ramp-epochs 3 \
+    --sketch-ramp-epochs 5 \
     --cross-clothes-contrastive-weight 0.5 \
     --contrastive-temperature 0.10 \
-    --cross-clothes-hard-negative-weight 2.0 \
-    --cal-sigmoid-ramp \
+    --cross-clothes-hard-negative-weight 2.5 \
     --no-use-part-branch \
     --triplet-weight 1.0 \
     --triplet-margin 0.3 \
     --weight-decay 0.01 \
     --freeze-backbone-layers "" \
-    --pretrained-checkpoint ${CLIP_STAGE2}/best.pth \
-    --teacher-checkpoint ${CLIP_STAGE2}/best.pth \
-    --distill-weight 0.02 \
+    --pretrained-checkpoint ${CLIP_STAGE1}/best.pth \
+    --teacher-checkpoint "" \
+    --distill-weight 0 \
     --best-metric mAP \
     --best-dataset prcc \
-    --eval-period 1 \
+    --eval-period 2 \
     --color-jitter-probability 0.5 \
     --random-grayscale-probability 0.2 \
     --num-workers ${NUM_WORKERS} \

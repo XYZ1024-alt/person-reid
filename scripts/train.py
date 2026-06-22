@@ -88,7 +88,9 @@ PRECISION_FP32 = "fp32"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a pure PyTorch ReID model")
-    parser.add_argument("--mode", choices=[MODE_MARKET, MODE_PRCC, MODE_JOINT], default=MODE_JOINT)
+    parser.add_argument("--mode", choices=[MODE_MARKET, MODE_PRCC], default=MODE_PRCC)
+    parser.add_argument("--use-sketch-fusion", action="store_true",
+                        help="Use ClothInvariantReIDHead with cross-attention sketch fusion (Stage 3 only)")
     parser.add_argument("--backbone", choices=['clip_vit_l', 'eva02_l'], default='clip_vit_l',
                         help='Backbone architecture: clip_vit_l (default, 70-73%% PRCC mAP), eva02_l (72-75%% expected)')
     parser.add_argument("--backbone-lr", type=float, default=None,

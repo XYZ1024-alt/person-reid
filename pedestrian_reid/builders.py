@@ -19,8 +19,8 @@ from pedestrian_reid.data.datasets import (
 from pedestrian_reid.data.samplers import (
     ClothesAwareIdentityBatchSampler,
     IdentityBatchSampler,
-    SourceBalancedIdentityBatchSampler,
-    SourceBalancedSamplerConfig,
+    # SourceBalancedIdentityBatchSampler,  # DEPRECATED with MODE_JOINT
+    # SourceBalancedSamplerConfig,  # DEPRECATED with MODE_JOINT
 )
 from pedestrian_reid.data.transforms import ReIDTransform, TransformConfig
 
@@ -28,7 +28,7 @@ from pedestrian_reid.data.transforms import ReIDTransform, TransformConfig
 MODE_MARKET = "market"
 MODE_PRCC = "prcc"
 MODE_PRCC_DEV = "prcc_dev"
-MODE_JOINT = "joint"
+# MODE_JOINT = "joint"  # DEPRECATED: Removed to skip Stage 2 joint training
 NO_PRCC_DEV_IDENTITIES = 0
 
 
@@ -47,16 +47,7 @@ def build_eval_loader(root: str | Path, dataset_name: str, split: str, variant: 
 
 def build_train_loader(dataset: ReIDDataset, args: Namespace, distributed=None) -> DataLoader:
     batch_size = _train_batch_size(args, distributed)
-    if _use_source_balanced_sampling(args):
-        config = SourceBalancedSamplerConfig(
-            samples=dataset.samples,
-            batch_size=batch_size,
-            instances=args.instances,
-            source_ratio=args.prcc_identities_ratio,
-            epoch_batch_size=args.batch_size,
-        )
-        sampler = SourceBalancedIdentityBatchSampler(config)
-        return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
+    # Source-balanced sampling removed (was only for deprecated MODE_JOINT)
     if args.mode == MODE_PRCC:
         sampler = ClothesAwareIdentityBatchSampler(
             dataset.samples,
@@ -69,8 +60,9 @@ def build_train_loader(dataset: ReIDDataset, args: Namespace, distributed=None) 
     return DataLoader(dataset, batch_sampler=sampler, **_loader_kwargs(args))
 
 
-def _use_source_balanced_sampling(args: Namespace) -> bool:
-    return args.mode == MODE_JOINT and not args.disable_source_balanced_sampling
+# DEPRECATED: Source-balanced sampling removed with MODE_JOINT
+# def _use_source_balanced_sampling(args: Namespace) -> bool:
+#     return args.mode == MODE_JOINT and not args.disable_source_balanced_sampling
 
 
 def _train_batch_size(args: Namespace, distributed) -> int:
@@ -119,10 +111,8 @@ def _training_samples(args: Namespace) -> list[ReidSample]:
         return load_market_samples(args.market_root, "train")
     if args.mode == MODE_PRCC:
         return _exclude_prcc_dev(load_prcc_samples(args.prcc_root, "train", args.use_prcc_sketch), args)
-    _require_prcc_root(args.prcc_root)
-    market_samples = load_market_samples(args.market_root, "train")
-    prcc_samples = _exclude_prcc_dev(load_prcc_samples(args.prcc_root, "train", args.use_prcc_sketch), args)
-    return market_samples + prcc_samples
+    # MODE_JOINT removed - no longer concatenate Market + PRCC
+    raise ValueError(f"Unknown training mode: {args.mode}")
 
 
 def _eval_samples(root: str | Path, dataset_name: str, split: str, args: Namespace) -> list[ReidSample]:

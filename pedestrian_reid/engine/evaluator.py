@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from pedestrian_reid.builders import MODE_JOINT, MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV, build_eval_loader
+from pedestrian_reid.builders import MODE_MARKET, MODE_PRCC, MODE_PRCC_DEV, build_eval_loader
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
 from pedestrian_reid.modules.metrics import PROTOCOL_CLOTH_CHANGE, PROTOCOL_STANDARD
 from pedestrian_reid.modules.metrics import evaluate_reid, extract_feature_bank
@@ -43,9 +43,9 @@ def evaluate_enabled_datasets(model, device: torch.device, args: Namespace):
 
 def enabled_eval_jobs(args: Namespace) -> list[EvalJob]:
     jobs: list[EvalJob] = []
-    if args.mode in {MODE_MARKET, MODE_JOINT}:
+    if args.mode == MODE_MARKET:
         jobs.append(EvalJob(MODE_MARKET, args.market_root, PROTOCOL_STANDARD))
-    if args.mode in {MODE_PRCC, MODE_JOINT}:
+    if args.mode == MODE_PRCC:
         jobs.append(_prcc_eval_job(args))
     return jobs
 

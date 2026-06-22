@@ -181,6 +181,7 @@ class PedestrianReIDNet(nn.Module):
         use_domain_adversarial: bool = False,
         backbone_type: str = 'clip_vit_l',
         backbone_pretrained: bool = True,
+        use_sketch_fusion: bool = False,
     ):
         super().__init__()
         _validate_combined_weights(combined_global_weight, combined_part_weight)
@@ -195,6 +196,7 @@ class PedestrianReIDNet(nn.Module):
         self.num_prcc_classes = num_prcc_classes
         self.use_domain_adversarial = use_domain_adversarial
         self.backbone_type = backbone_type
+        self.use_sketch_fusion = use_sketch_fusion
 
         # Dynamic backbone creation
         from pedestrian_reid.modules.backbones import create_backbone
@@ -208,15 +210,32 @@ class PedestrianReIDNet(nn.Module):
             # ViT already outputs CLS token, no pooling needed
             self.pool = nn.Identity()
 
-        self.embedding = nn.Linear(backbone_dim, embedding_dim, bias=False)
-        self.bnneck = nn.BatchNorm1d(embedding_dim)
-        self.classifier = _identity_classifier(embedding_dim, num_market_classes if use_dual_classifier else num_classes)
-        self.prcc_classifier = _identity_classifier(embedding_dim, num_prcc_classes) if use_dual_classifier else None
-        self.clothes_classifier = _clothes_classifier(embedding_dim, num_clothes_classes)
+        # Conditional head: ClothInvariantReIDHead for sketch fusion, standard path otherwise
+        if use_sketch_fusion:
+            self.sketch_head = ClothInvariantReIDHead(
+                embedding_dim=embedding_dim,
+                num_reid_classes=num_prcc_classes if use_dual_classifier else num_classes,
+                num_clothes_classes=num_clothes_classes,
+                clip_dim=backbone_dim,
+            )
+            # Mark standard components as unused
+            self.embedding = None
+            self.bnneck = None
+            self.classifier = None
+            self.prcc_classifier = None
+            self.clothes_classifier = None
+        else:
+            self.sketch_head = None
+            self.embedding = nn.Linear(backbone_dim, embedding_dim, bias=False)
+            self.bnneck = nn.BatchNorm1d(embedding_dim)
+            self.classifier = _identity_classifier(embedding_dim, num_market_classes if use_dual_classifier else num_classes)
+            self.prcc_classifier = _identity_classifier(embedding_dim, num_prcc_classes) if use_dual_classifier else None
+            self.clothes_classifier = _clothes_classifier(embedding_dim, num_clothes_classes)
+
         self.part_branch = _part_branch(use_part_branch, num_parts, part_embedding_dim, backbone_dim)
         self.domain_discriminator = DomainDiscriminator(embedding_dim) if use_domain_adversarial else None
 
-    def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, images: torch.Tensor, sketch_features: torch.Tensor | None = None, alpha: float = 1.0) -> dict[str, torch.Tensor]:
         feature_map = self.backbone(images)
 
         # Handle different backbone output formats
@@ -227,6 +246,14 @@ class PedestrianReIDNet(nn.Module):
             # ViT backbone: [B, D] (already CLS token)
             pooled = feature_map
 
+        # Use ClothInvariantReIDHead for sketch fusion path
+        if self.use_sketch_fusion:
+            outputs = self.sketch_head(pooled, sketch_features, alpha=alpha)
+            # Part branch not supported with sketch fusion (ViT-only feature)
+            outputs["combined_features"] = outputs["bn_features"]
+            return outputs
+
+        # Standard path (backward compatible)
         embedding = self.embedding(pooled)
         bn_features = self.bnneck(embedding)
         outputs = {

@@ -397,6 +397,7 @@ def build_model(dataset, args: Namespace) -> PedestrianReIDNet:
         use_domain_adversarial=getattr(args, "use_domain_adversarial", False),
         backbone_type=getattr(args, "backbone", "clip_vit_l"),
         backbone_pretrained=True,
+        use_sketch_fusion=getattr(args, "use_sketch_fusion", False),
     )
 
 
@@ -1047,7 +1048,8 @@ def _train_batch(
     sources = batch["source"]
     has_sketch = batch["has_sketch"].bool()
     sketch_context = _build_sketch_context(model, batch, labels, has_sketch, device, args, effective_consistency_weight)
-    outputs, sketch_outputs = _forward_training_paths(model, images, sketch_context, device, args)
+    # Pass alpha (effective_cal_weight) for temporal curriculum gradient reversal
+    outputs, sketch_outputs = _forward_training_paths(model, images, sketch_context, device, args, alpha=effective_cal_weight)
     _validate_batch_targets(labels, _total_identity_classes(outputs), "identity label")
     _validate_batch_clothes_targets(clothes_labels, outputs, effective_cal_weight)
     labels = labels.to(device, non_blocking=args.pin_memory)
@@ -1157,7 +1159,25 @@ def _build_sketch_context(model, batch, labels: torch.Tensor, has_sketch: torch.
     return SketchContext(True, sketch_images, sketch_labels, rgb_mask, targets)
 
 
-def _forward_training_paths(model, images: torch.Tensor, sketch_context: SketchContext, device, args):
+def _forward_training_paths(model, images: torch.Tensor, sketch_context: SketchContext, device, args, alpha: float = 1.0):
+    # New sketch fusion path: extract RGB and sketch features separately
+    if hasattr(model, 'use_sketch_fusion') and model.use_sketch_fusion:
+        with _autocast_context(args, device):
+            # Extract RGB CLIP features
+            rgb_features = model.backbone(images)
+
+            # Extract sketch CLIP features if available
+            sketch_features = None
+            if sketch_context.enabled and sketch_context.images is not None:
+                sketch_features = model.backbone(sketch_context.images)
+
+            # Forward through head with sketch fusion and temporal alpha
+            outputs = model.forward(images, sketch_features=sketch_features, alpha=alpha)
+
+        # No separate sketch outputs with fusion approach
+        return outputs, None
+
+    # Legacy concatenation path (backward compatible)
     if not sketch_context.enabled or args.sketch_loss_weight <= NO_SKETCH_LOSS:
         with _autocast_context(args, device):
             return model(images), None
