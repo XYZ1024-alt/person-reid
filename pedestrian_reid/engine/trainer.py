@@ -1163,15 +1163,13 @@ def _forward_training_paths(model, images: torch.Tensor, sketch_context: SketchC
     # New sketch fusion path: extract RGB and sketch features separately
     if hasattr(model, 'use_sketch_fusion') and model.use_sketch_fusion:
         with _autocast_context(args, device):
-            # Extract RGB CLIP features
-            rgb_features = model.backbone(images)
-
             # Extract sketch CLIP features if available
             sketch_features = None
             if sketch_context.enabled and sketch_context.images is not None:
                 sketch_features = model.backbone(sketch_context.images)
 
-            # Forward through head with sketch fusion and temporal alpha
+            # Forward through model with sketch fusion and temporal alpha
+            # Model will extract RGB features internally via backbone
             outputs = model.forward(images, sketch_features=sketch_features, alpha=alpha)
 
         # No separate sketch outputs with fusion approach
