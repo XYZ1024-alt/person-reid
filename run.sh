@@ -50,9 +50,9 @@ fi
 # ============================================================================
 
 EXP_ROOT="${EXP_ROOT:-outputs/transfer}"
-CLIP_STAGE1="${EXP_ROOT}/expT_market_clip"
-CLIP_STAGE2="${EXP_ROOT}/expT4_clip_l"
-CLIP_STAGE3="${EXP_ROOT}/expT5_clip_l"
+CLIP_STAGE1="${EXP_ROOT}/stage1_market_clip"
+# CLIP_STAGE2 removed - Stage 2 skipped in direct transfer pipeline
+CLIP_STAGE3="${EXP_ROOT}/stage3_prcc_direct"
 
 # ============================================================================
 # MLflow配置
