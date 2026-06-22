@@ -138,18 +138,18 @@ if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
     --lr-gamma 0.1 \
     --market-root Market-1501 \
     --prcc-root prcc \
-    --prcc-identities-ratio 0.75 \
+    --prcc-identities-ratio 0.85 \
     --use-dual-classifier \
-    --domain-adversarial-weight 0.1 \
+    --domain-adversarial-weight 0.2 \
     --cal-weight 0.05 \
     --cal-warmup-epochs 5 \
     --cal-ramp-epochs 20 \
-    --prcc-ce-weight 0.3 \
-    --prcc-ce-final-weight 1.0 \
+    --prcc-ce-weight 0.5 \
+    --prcc-ce-final-weight 2.0 \
     --prcc-ce-ramp-epochs 15 \
-    --cross-clothes-contrastive-weight 0.3 \
+    --cross-clothes-contrastive-weight 0.5 \
     --contrastive-temperature 0.10 \
-    --cross-clothes-hard-negative-weight 2.0 \
+    --cross-clothes-hard-negative-weight 2.5 \
     --cal-sigmoid-ramp \
     --use-prcc-sketch \
     --rgb-sketch-consistency-weight 0.05 \
