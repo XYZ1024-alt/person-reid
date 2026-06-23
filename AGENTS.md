@@ -96,10 +96,9 @@ pip install -r requirements.txt
 
 ### Training Pipeline Architecture
 
-**3-Stage Transfer Learning:**
-1. **Stage 1** (Market pretraining): Market-1501 only, 60 epochs, freeze backbone 10 epochs
-2. **Stage 2** (Joint training): Market + PRCC, 50 epochs, dual classifiers, CAL/sketch/contrastive losses
-3. **Stage 3** (PRCC fine-tuning): PRCC only, 12 epochs, aggressive contrastive learning
+**2-Stage Direct Transfer Learning:**
+1. **Stage 1** (Market pretraining): Market-1501 only, 60 epochs
+2. **Stage 2** (PRCC fine-tuning): PRCC only, 30 epochs, sketch fusion and cross-clothes learning
 
 **Key Training Mechanisms:**
 - **Backbone freezing**: `--freeze-backbone-epochs N` freezes entire ViT (all-or-nothing, no per-layer control)
@@ -135,10 +134,10 @@ When `--use-dual-classifier` is enabled:
 ### Loss Component Weights
 Stage-dependent defaults (see `run.sh`):
 - **Triplet**: Always 1.0
-- **CAL**: 0 (Stage 1) → 0.05 (Stage 2) → 0.03 (Stage 3)
-- **Sketch**: 0.05 (Stage 2) → 0.1 (Stage 3)
-- **Cross-clothes contrastive**: 0.3 (Stage 2) → 0.5 (Stage 3)
-- **Distillation**: 0.05→0.02 (Stage 2) → 0.02 (Stage 3)
+- **CAL**: 0 (Stage 1) -> 0.03 (Stage 2)
+- **Sketch consistency**: 0.1 (Stage 2)
+- **Cross-clothes contrastive**: 0.5 (Stage 2)
+- **Distillation**: Disabled by default
 
 ### Dataset Structure
 Expected directory layout:

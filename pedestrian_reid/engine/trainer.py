@@ -485,7 +485,7 @@ def _compatible_pretrained_state(
     selected = {}
     skipped = []
 
-    # Build mapping from Stage 1 head keys to Stage 3 sketch_head keys
+    # Build mapping from Stage 1 head keys to Stage 2 sketch_head keys
     head_to_sketch_head = _build_sketch_head_key_mapping(target)
 
     for key, value in source.items():
@@ -523,7 +523,7 @@ def _required_checkpoint_model_config(checkpoint: dict, path: str) -> dict:
 
 
 def _build_sketch_head_key_mapping(target: dict[str, torch.Tensor]) -> dict[str, str]:
-    """Map standard head keys (Stage 1) to sketch_head keys (Stage 3)."""
+    """Map standard head keys (Stage 1) to sketch_head keys (Stage 2)."""
     mapping = {}
     for key in target:
         if key.startswith("sketch_head."):

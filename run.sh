@@ -3,13 +3,13 @@ set -euo pipefail
 
 # Foundation Model direct-transfer training pipeline.
 # Stage 1: Market-1501 pretraining.
-# Stage 3: PRCC fine-tuning from the Stage 1 checkpoint.
+# Stage 2: PRCC fine-tuning from the Stage 1 checkpoint.
 
 GPUS="${GPUS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
 START_STAGE="${START_STAGE:-1}"
-STOP_STAGE="${STOP_STAGE:-3}"
+STOP_STAGE="${STOP_STAGE:-2}"
 
 if [[ "$GPUS" -gt 1 ]]; then
   PYTHON="torchrun --nproc_per_node=${GPUS}"
@@ -25,9 +25,9 @@ MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:./outputs/mlruns}"
 
 BACKBONE="${BACKBONE:-clip_vit_l}"
 BACKBONE_LR_STAGE1="${BACKBONE_LR_STAGE1:-1e-5}"
-BACKBONE_LR_STAGE3="${BACKBONE_LR_STAGE3:-5e-6}"
+BACKBONE_LR_STAGE2="${BACKBONE_LR_STAGE2:-5e-6}"
 HEAD_LR_STAGE1="${HEAD_LR_STAGE1:-1e-4}"
-HEAD_LR_STAGE3="${HEAD_LR_STAGE3:-5e-5}"
+HEAD_LR_STAGE2="${HEAD_LR_STAGE2:-5e-5}"
 PRECISION="${PRECISION:-fp16}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +41,7 @@ fi
 
 EXP_ROOT="${EXP_ROOT:-outputs/transfer}"
 CLIP_STAGE1="${EXP_ROOT}/stage1_market_clip"
-CLIP_STAGE3="${EXP_ROOT}/stage3_prcc_direct"
+CLIP_STAGE2="${EXP_ROOT}/stage2_prcc_direct"
 
 if [[ "$USE_MLFLOW" == "1" ]]; then
   MLFLOW_ARGS="--use-mlflow --mlflow-experiment ${MLFLOW_EXPERIMENT} --mlflow-tracking-uri ${MLFLOW_TRACKING_URI}"
@@ -94,15 +94,15 @@ if [[ "$START_STAGE" -le 1 && "$STOP_STAGE" -ge 1 ]]; then
     --num-workers "${NUM_WORKERS}"
 fi
 
-if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
+if [[ "$START_STAGE" -le 2 && "$STOP_STAGE" -ge 2 ]]; then
   echo "============================================================================"
-  echo "Stage 3: PRCC fine-tuning from Stage 1"
+  echo "Stage 2: PRCC fine-tuning from Stage 1"
   echo "============================================================================"
 
   $PYTHON scripts/train.py \
     --backbone "${BACKBONE}" \
-    --backbone-lr "${BACKBONE_LR_STAGE3}" \
-    --head-lr "${HEAD_LR_STAGE3}" \
+    --backbone-lr "${BACKBONE_LR_STAGE2}" \
+    --head-lr "${HEAD_LR_STAGE2}" \
     --mode prcc \
     --epochs 30 \
     --batch-size "${BATCH_SIZE}" \
@@ -133,13 +133,13 @@ if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
     --random-grayscale-probability 0.2 \
     --num-workers "${NUM_WORKERS}" \
     --precision "${PRECISION}" \
-    --output-dir "${CLIP_STAGE3}" \
+    --output-dir "${CLIP_STAGE2}" \
     ${DISTRIBUTED_ARG} \
     ${MLFLOW_ARGS}
 
-  echo "Stage 3 complete. Evaluating PRCC..."
+  echo "Stage 2 complete. Evaluating PRCC..."
   $PYTHON scripts/evaluate.py \
-    --checkpoint "${CLIP_STAGE3}/best.pth" \
+    --checkpoint "${CLIP_STAGE2}/best.pth" \
     --dataset prcc \
     --root prcc \
     --batch-size 128 \
@@ -147,6 +147,6 @@ if [[ "$START_STAGE" -le 3 && "$STOP_STAGE" -ge 3 ]]; then
 
   echo "============================================================================"
   echo "Training complete"
-  echo "Final model: ${CLIP_STAGE3}/best.pth"
+  echo "Final model: ${CLIP_STAGE2}/best.pth"
   echo "============================================================================"
 fi
