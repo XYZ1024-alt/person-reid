@@ -66,6 +66,7 @@ DEFAULT_PRCC_CE_RAMP_EPOCHS = 0
 DEFAULT_CROSS_CLOTHES_CONTRASTIVE_WEIGHT = 0.0
 DEFAULT_CONTRASTIVE_TEMPERATURE = 0.07
 DEFAULT_HARD_NEGATIVE_WEIGHT = 2.0
+DEFAULT_STRICT_CROSS_CLOTHES_BATCHES = False
 DEFAULT_USE_DUAL_CLASSIFIER = False
 DEFAULT_DOMAIN_ADVERSARIAL_WEIGHT = 0.0
 DEFAULT_TENSORBOARD = True
@@ -164,6 +165,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_HARD_NEGATIVE_WEIGHT,
         help="Weight multiplier for hard negatives (different ID, same clothes) in cross-clothes contrastive loss. "
              "Higher values more aggressively push apart people wearing similar outfits. Default: 2.0"
+    )
+    parser.add_argument(
+        "--strict-cross-clothes-batches",
+        action="store_true",
+        default=DEFAULT_STRICT_CROSS_CLOTHES_BATCHES,
+        help="Crash training when a PRCC batch has no positive cross-clothes pairs instead of skipping this loss term.",
     )
     parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=DEFAULT_TENSORBOARD)
     parser.add_argument("--tensorboard-dir", default=DEFAULT_TENSORBOARD_DIR)

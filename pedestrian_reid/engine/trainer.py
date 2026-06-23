@@ -21,7 +21,7 @@ from pedestrian_reid.builders import selected_prcc_dev_pids
 from pedestrian_reid.data.datasets import PRCC_SOURCE, UNKNOWN_CLOTHES
 from pedestrian_reid.engine.evaluator import evaluate_enabled_datasets, load_model, primary_eval_metric
 from pedestrian_reid.data.transforms import VARIANT_DARK, VARIANT_OCCLUDED, VARIANT_STANDARD
-from pedestrian_reid.modules.losses import batch_hard_triplet_loss
+from pedestrian_reid.modules.losses import ClothInvariantContrastiveLoss, batch_hard_triplet_loss
 from pedestrian_reid.modules.metrics import COMBINED_FEATURE_KEY, FEATURE_KEYS
 from pedestrian_reid.modules.model import PedestrianReIDNet
 
@@ -56,6 +56,7 @@ TRAIN_METRIC_FIELDS = [
     "cloth_invariant",
     "cross_clothes_contrastive",
     "valid_cross_clothes_pairs",
+    "skipped_cross_clothes_batches",
     "domain",
     "effective_cal_weight",
     "cal_alpha",
@@ -94,7 +95,6 @@ NO_PRCC_CE_RAMP_EPOCHS = 0
 SINGLE_RAMP_EPOCH = 1
 NO_PRCC_DEV_IDENTITIES = 0
 MIN_CONTRASTIVE_TEMPERATURE = 0.0
-MIN_POSITIVE_COUNT = 1
 UPPER_TRIANGLE_DIAGONAL = 1
 AUGMENT_PROBABILITY_ARGS = (
     "flip_probability",
@@ -285,6 +285,13 @@ class AuxiliaryLosses:
     cloth_invariant: torch.Tensor
     cross_clothes_contrastive: torch.Tensor
     valid_cross_clothes_pairs: torch.Tensor
+    skipped_cross_clothes_batches: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CrossClothesContrastiveResult:
+    loss: torch.Tensor
+    skipped_batches: torch.Tensor
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -301,6 +308,31 @@ class LossComponents:
     effective_prcc_ce_weight: float
     consistency_weight: float
     distill_weight: float
+
+
+@dataclass(frozen=True)
+class EffectiveLossWeights:
+    cal: float
+    prcc_ce: float
+    consistency: float
+    distill: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class BatchLossRequest:
+    outputs: dict[str, torch.Tensor]
+    sketch_outputs: dict[str, torch.Tensor] | None
+    sketch_context: object
+    images: torch.Tensor
+    labels: torch.Tensor
+    clothes_labels: torch.Tensor
+    sources: object
+    teacher: object
+    device: torch.device
+    args: Namespace
+    weights: EffectiveLossWeights
+    epoch: int
+    batch_index: int
 
 
 def train_from_args(args: Namespace) -> None:
@@ -723,12 +755,9 @@ def train_one_epoch(
     model.train()
     configure_backbone_freeze(model, args, epoch, distributed=distributed)
     totals = _empty_epoch_totals()
-    effective_cal_weight = _effective_cal_weight(args, epoch)
-    effective_prcc_ce_weight = _effective_prcc_ce_weight(args, epoch)
-    effective_consistency_weight = _effective_sketch_consistency_weight(args, epoch)
-    effective_distill_weight = _effective_distill_weight(args, epoch)
+    weights = _effective_loss_weights(args, epoch)
     progress = tqdm(loader, desc="batches", unit="batch", disable=not distributed.is_main)
-    for batch in progress:
+    for batch_index, batch in enumerate(progress):
         losses = _train_batch(
             model,
             batch,
@@ -737,27 +766,33 @@ def train_one_epoch(
             scaler=scaler,
             device=device,
             args=args,
-            effective_cal_weight=effective_cal_weight,
-            effective_prcc_ce_weight=effective_prcc_ce_weight,
-            effective_consistency_weight=effective_consistency_weight,
-            effective_distill_weight=effective_distill_weight,
+            weights=weights,
+            epoch=epoch,
+            batch_index=batch_index,
         )
         _accumulate(totals, losses)
-        progress.set_postfix(
-            _batch_metrics(
-                losses,
-                cal_weight=effective_cal_weight,
-                prcc_ce_weight=effective_prcc_ce_weight,
-                consistency_weight=effective_consistency_weight,
-                distill_weight=effective_distill_weight,
-            )
-        )
-    metrics = {key: value / len(loader) for key, value in totals.items()}
-    metrics["effective_cal_weight"] = effective_cal_weight
-    metrics["cal_alpha"] = effective_cal_weight  # Track alpha for gradient reversal scale
-    metrics["effective_prcc_ce_weight"] = effective_prcc_ce_weight
-    metrics["effective_sketch_consistency_weight"] = effective_consistency_weight
-    metrics["effective_distill_weight"] = effective_distill_weight
+        progress.set_postfix(_batch_metrics(losses, weights=weights))
+    metrics = _epoch_metrics(totals, len(loader), weights)
+    return metrics
+
+
+def _effective_loss_weights(args: Namespace, epoch: int) -> EffectiveLossWeights:
+    return EffectiveLossWeights(
+        cal=_effective_cal_weight(args, epoch),
+        prcc_ce=_effective_prcc_ce_weight(args, epoch),
+        consistency=_effective_sketch_consistency_weight(args, epoch),
+        distill=_effective_distill_weight(args, epoch),
+    )
+
+
+def _epoch_metrics(totals: dict[str, float], batch_count: int, weights: EffectiveLossWeights) -> dict[str, float]:
+    metrics = {key: value / batch_count for key, value in totals.items()}
+    metrics["skipped_cross_clothes_batches"] = totals["skipped_cross_clothes_batches"]
+    metrics["effective_cal_weight"] = weights.cal
+    metrics["cal_alpha"] = weights.cal
+    metrics["effective_prcc_ce_weight"] = weights.prcc_ce
+    metrics["effective_sketch_consistency_weight"] = weights.consistency
+    metrics["effective_distill_weight"] = weights.distill
     return metrics
 
 
@@ -1080,39 +1115,65 @@ def _train_batch(
     scaler,
     device: torch.device,
     args: Namespace,
-    effective_cal_weight: float,
-    effective_prcc_ce_weight: float,
-    effective_consistency_weight: float,
-    effective_distill_weight: float,
+    weights: EffectiveLossWeights,
+    epoch: int,
+    batch_index: int,
 ):
     images = batch["image"].to(device, non_blocking=args.pin_memory)
     labels = batch["label"]
     clothes_labels = batch["clothes_label"]
     sources = batch["source"]
     has_sketch = batch["has_sketch"].bool()
-    sketch_context = _build_sketch_context(model, batch, labels, has_sketch, device, args, effective_consistency_weight)
+    sketch_context = _build_sketch_context(model, batch, labels, has_sketch, device, args, weights.consistency)
     # Pass alpha (effective_cal_weight) for temporal curriculum gradient reversal
-    outputs, sketch_outputs = _forward_training_paths(model, images, sketch_context, device, args, alpha=effective_cal_weight)
+    outputs, sketch_outputs = _forward_training_paths(model, images, sketch_context, device, args, alpha=weights.cal)
     _validate_batch_targets(labels, _total_identity_classes(outputs), "identity label")
-    _validate_batch_clothes_targets(clothes_labels, outputs, effective_cal_weight)
+    _validate_batch_clothes_targets(clothes_labels, outputs, weights.cal)
     labels = labels.to(device, non_blocking=args.pin_memory)
     clothes_labels = clothes_labels.to(device, non_blocking=args.pin_memory)
-    classification = _classification_losses(outputs, labels, sources, effective_prcc_ce_weight, device, args.num_market_classes)
+    components = _compute_loss_components(
+        BatchLossRequest(
+            outputs=outputs,
+            sketch_outputs=sketch_outputs,
+            sketch_context=sketch_context,
+            images=images,
+            labels=labels,
+            clothes_labels=clothes_labels,
+            sources=sources,
+            teacher=teacher,
+            device=device,
+            args=args,
+            weights=weights,
+            epoch=epoch,
+            batch_index=batch_index,
+        )
+    )
+    loss = _total_loss(args, components)
+    _optimizer_step(loss, optimizer, scaler)
+    return _batch_loss_metrics(loss, components)
+
+
+def _compute_loss_components(request: BatchLossRequest) -> LossComponents:
+    outputs = request.outputs
+    args = request.args
+    labels = request.labels
+    clothes_labels = request.clothes_labels
+    classification = _classification_loss_component(request)
     triplet_features = _training_feature_output(outputs, args.triplet_feature_key).float()
     triplet = batch_hard_triplet_loss(triplet_features, labels, args.triplet_margin)
-    cal_loss = _cal_loss(outputs, clothes_labels, effective_cal_weight)
-    sketch_loss, consistency_loss = _sketch_losses(sketch_context, outputs, sketch_outputs, device, args, effective_consistency_weight)
+    cal_loss = _cal_loss(outputs, clothes_labels, request.weights.cal)
+    sketch_loss, consistency_loss = _sketch_loss_components(request)
     distill_loss = _distill_loss(
         outputs,
-        teacher=teacher,
-        images=images,
-        device=device,
+        teacher=request.teacher,
+        images=request.images,
+        device=request.device,
         args=args,
-        distill_weight=effective_distill_weight,
+        distill_weight=request.weights.distill,
     )
-    auxiliary = _auxiliary_losses(outputs, labels, clothes_labels, sources, args, device)
-    domain_loss = _domain_adversarial_loss(outputs, sources, args, device)
-    components = LossComponents(
+    auxiliary = _auxiliary_loss_components(request)
+    domain_loss = _domain_adversarial_loss(outputs, request.sources, args, request.device)
+    return LossComponents(
         classification=classification,
         triplet=triplet,
         cal=cal_loss,
@@ -1121,17 +1182,53 @@ def _train_batch(
         distill=distill_loss,
         domain=domain_loss,
         auxiliary=auxiliary,
-        effective_cal_weight=effective_cal_weight,
-        effective_prcc_ce_weight=effective_prcc_ce_weight,
-        consistency_weight=effective_consistency_weight,
-        distill_weight=effective_distill_weight,
+        effective_cal_weight=request.weights.cal,
+        effective_prcc_ce_weight=request.weights.prcc_ce,
+        consistency_weight=request.weights.consistency,
+        distill_weight=request.weights.distill,
     )
-    loss = _total_loss(args, components)
+
+
+def _classification_loss_component(request: BatchLossRequest) -> ClassificationLosses:
+    return _classification_losses(
+        request.outputs,
+        request.labels,
+        request.sources,
+        request.weights.prcc_ce,
+        request.device,
+        request.args.num_market_classes,
+    )
+
+
+def _sketch_loss_components(request: BatchLossRequest) -> tuple[torch.Tensor, torch.Tensor]:
+    return _sketch_losses(
+        request.sketch_context,
+        request.outputs,
+        request.sketch_outputs,
+        request.device,
+        request.args,
+        request.weights.consistency,
+    )
+
+
+def _auxiliary_loss_components(request: BatchLossRequest) -> AuxiliaryLosses:
+    return _auxiliary_losses(
+        request.outputs,
+        request.labels,
+        request.clothes_labels,
+        request.sources,
+        request.args,
+        request.device,
+        request.epoch,
+        request.batch_index,
+    )
+
+
+def _optimizer_step(loss: torch.Tensor, optimizer, scaler) -> None:
     optimizer.zero_grad()
     scaler.scale(loss).backward()
     scaler.step(optimizer)
     scaler.update()
-    return _batch_loss_metrics(loss, components)
 
 
 def _batch_loss_metrics(loss: torch.Tensor, components: LossComponents) -> dict[str, torch.Tensor]:
@@ -1149,6 +1246,7 @@ def _batch_loss_metrics(loss: torch.Tensor, components: LossComponents) -> dict[
         "cloth_invariant": components.auxiliary.cloth_invariant,
         "cross_clothes_contrastive": components.auxiliary.cross_clothes_contrastive,
         "valid_cross_clothes_pairs": components.auxiliary.valid_cross_clothes_pairs,
+        "skipped_cross_clothes_batches": components.auxiliary.skipped_cross_clothes_batches,
         "domain": components.domain,
     }
 
@@ -1342,11 +1440,29 @@ def _distill_loss(
     return 1.0 - F.cosine_similarity(student_features, teacher_features, dim=1).mean()
 
 
-def _auxiliary_losses(outputs, labels: torch.Tensor, clothes_labels: torch.Tensor, sources, args, device) -> AuxiliaryLosses:
+def _auxiliary_losses(
+    outputs,
+    labels: torch.Tensor,
+    clothes_labels: torch.Tensor,
+    sources,
+    args,
+    device,
+    epoch: int,
+    batch_index: int,
+) -> AuxiliaryLosses:
     part_triplet = _part_triplet_loss(outputs, labels, args, device)
     cloth_invariant, pair_count = _cloth_invariant_loss(outputs, labels, clothes_labels, sources, args, device)
-    contrastive = _cross_clothes_contrastive_loss(outputs, labels, clothes_labels, sources, args, device)
-    return AuxiliaryLosses(part_triplet, cloth_invariant, contrastive, pair_count)
+    contrastive = _cross_clothes_contrastive_component(
+        outputs,
+        labels,
+        clothes_labels,
+        sources,
+        args,
+        device,
+        epoch=epoch,
+        batch_index=batch_index,
+    )
+    return AuxiliaryLosses(part_triplet, cloth_invariant, contrastive.loss, pair_count, contrastive.skipped_batches)
 
 
 def _part_triplet_loss(outputs, labels: torch.Tensor, args, device) -> torch.Tensor:
@@ -1370,52 +1486,83 @@ def _cloth_invariant_loss(outputs, labels: torch.Tensor, clothes_labels: torch.T
 
 
 def _cross_clothes_contrastive_loss(outputs, labels: torch.Tensor, clothes_labels: torch.Tensor, sources, args, device):
+    result = _cross_clothes_contrastive_component(outputs, labels, clothes_labels, sources, args, device)
+    return result.loss
+
+
+def _cross_clothes_contrastive_component(
+    outputs,
+    labels: torch.Tensor,
+    clothes_labels: torch.Tensor,
+    sources,
+    args,
+    device,
+    *,
+    epoch: int | None = None,
+    batch_index: int | None = None,
+) -> CrossClothesContrastiveResult:
     if args.cross_clothes_contrastive_weight <= NO_CROSS_CLOTHES_CONTRASTIVE_LOSS:
-        return _zero_loss(device)
-    features = _training_feature_output(outputs, args.triplet_feature_key).float()
+        return CrossClothesContrastiveResult(_zero_loss(device), _zero_skip_count(device))
     valid = _source_mask(sources, device) & clothes_labels.ge(0)
     if not valid.any().item():
         raise ValueError("cross-clothes contrastive loss requires PRCC samples with known clothes labels")
-    return _supervised_cross_clothes_contrastive(
-        features=features[valid],
-        labels=labels[valid],
-        clothes_labels=clothes_labels[valid],
+    valid_labels = labels[valid]
+    valid_clothes = clothes_labels[valid]
+    if not _has_positive_cross_clothes_pairs(valid_labels, valid_clothes):
+        return _invalid_cross_clothes_batch(args, valid_labels, valid_clothes, device, epoch, batch_index)
+    criterion = ClothInvariantContrastiveLoss(
+        feature_key=args.triplet_feature_key,
         temperature=args.contrastive_temperature,
         hard_negative_weight=args.cross_clothes_hard_negative_weight,
     )
+    selected_outputs = _select_contrastive_outputs(outputs, args.triplet_feature_key, valid)
+    loss = criterion(selected_outputs, valid_labels, valid_clothes)
+    return CrossClothesContrastiveResult(loss, _zero_skip_count(device))
 
 
-def _supervised_cross_clothes_contrastive(
-    *,
-    features: torch.Tensor,
+def _has_positive_cross_clothes_pairs(labels: torch.Tensor, clothes_labels: torch.Tensor) -> bool:
+    same_identity = labels.unsqueeze(0).eq(labels.unsqueeze(1))
+    different_clothes = clothes_labels.unsqueeze(0).ne(clothes_labels.unsqueeze(1))
+    return (same_identity & different_clothes).any().item()
+
+
+def _invalid_cross_clothes_batch(
+    args,
     labels: torch.Tensor,
     clothes_labels: torch.Tensor,
-    temperature: float,
-    hard_negative_weight: float,
-) -> torch.Tensor:
-    similarities = _pairwise_cosine(features) / temperature
-    same_identity = labels.unsqueeze(0).eq(labels.unsqueeze(1))
-    same_clothes = clothes_labels.unsqueeze(0).eq(clothes_labels.unsqueeze(1))
-    different_clothes = clothes_labels.unsqueeze(0).ne(clothes_labels.unsqueeze(1))
-    positive_mask = same_identity & different_clothes
-    hard_negative_mask = ~same_identity & same_clothes
-    denominator_mask = positive_mask | ~same_identity
-    positive_rows = positive_mask.any(dim=1)
-    if not positive_rows.any().item():
+    device,
+    epoch: int | None,
+    batch_index: int | None,
+) -> CrossClothesContrastiveResult:
+    if getattr(args, "strict_cross_clothes_batches", False):
         raise ValueError("cross-clothes contrastive loss found no positive cross-clothes pairs")
-    # Apply hard-negative weighting in log-space so the penalty is a true
-    # multiplicative factor on the softmax probability (w * exp(sim/T)),
-    # not a similarity scaler (exp(w * sim/T)) whose effect flips when
-    # similarities are negative.  Adding log(w) to the logit gives
-    # exp(sim/T + log(w)) = w * exp(sim/T), guaranteeing a consistent
-    # w-times contribution to the denominator regardless of sign(sim).
-    import math
-    weighted = similarities.clone()
-    weighted[hard_negative_mask] = weighted[hard_negative_mask] + math.log(hard_negative_weight)
-    log_prob = weighted - weighted.masked_fill(~denominator_mask, float("-inf")).logsumexp(dim=1, keepdim=True)
-    positive_count = positive_mask.sum(dim=1).clamp(min=MIN_POSITIVE_COUNT)
-    positive_log_prob = (log_prob * positive_mask.float()).sum(dim=1) / positive_count
-    return -positive_log_prob[positive_rows].mean()
+    _warn_skipped_cross_clothes_batch(labels, clothes_labels, epoch, batch_index)
+    return CrossClothesContrastiveResult(_zero_loss(device), _one_skip_count(device))
+
+
+def _select_contrastive_outputs(outputs, feature_key: str, valid: torch.Tensor) -> dict[str, torch.Tensor]:
+    features = _training_feature_output(outputs, feature_key).float()
+    return {feature_key: features[valid]}
+
+
+def _warn_skipped_cross_clothes_batch(
+    labels: torch.Tensor,
+    clothes_labels: torch.Tensor,
+    epoch: int | None,
+    batch_index: int | None,
+) -> None:
+    print(
+        "Warning: skipped cross-clothes contrastive batch "
+        f"epoch={_display_index(epoch)} batch={_display_index(batch_index)} "
+        f"valid_prcc_samples={labels.numel()} identities={labels.unique().numel()} "
+        f"clothes={clothes_labels.unique().numel()}"
+    )
+
+
+def _display_index(index: int | None) -> str:
+    if index is None:
+        return "unknown"
+    return str(index + 1)
 
 
 def _cross_clothes_pair_mask(labels: torch.Tensor, clothes_labels: torch.Tensor, sources, device) -> torch.Tensor:
@@ -1535,12 +1682,21 @@ def _empty_epoch_totals() -> dict[str, float]:
         "cloth_invariant": 0.0,
         "cross_clothes_contrastive": 0.0,
         "valid_cross_clothes_pairs": 0.0,
+        "skipped_cross_clothes_batches": 0.0,
         "domain": 0.0,
     }
 
 
 def _zero_loss(device: torch.device) -> torch.Tensor:
     return torch.zeros((), device=device)
+
+
+def _zero_skip_count(device: torch.device) -> torch.Tensor:
+    return torch.zeros((), device=device)
+
+
+def _one_skip_count(device: torch.device) -> torch.Tensor:
+    return torch.ones((), device=device)
 
 
 @contextmanager
@@ -1784,10 +1940,7 @@ def _rewrite_metric_file(path: Path, rows: list[dict[str, str]], fieldnames: lis
 def _batch_metrics(
     losses: dict[str, torch.Tensor],
     *,
-    cal_weight: float,
-    prcc_ce_weight: float,
-    consistency_weight: float,
-    distill_weight: float,
+    weights: EffectiveLossWeights,
 ) -> dict[str, str]:
     return {
         "loss": f"{losses['loss'].item():.4f}",
@@ -1803,11 +1956,12 @@ def _batch_metrics(
         "cloth": f"{losses['cloth_invariant'].item():.4f}",
         "xcloth": f"{losses['cross_clothes_contrastive'].item():.4f}",
         "pairs": f"{losses['valid_cross_clothes_pairs'].item():.0f}",
+        "skip_x": f"{losses['skipped_cross_clothes_batches'].item():.0f}",
         "dom": f"{losses['domain'].item():.4f}",
-        "cal_w": f"{cal_weight:.4f}",
-        "prcc_ce_w": f"{prcc_ce_weight:.4f}",
-        "con_w": f"{consistency_weight:.4f}",
-        "dis_w": f"{distill_weight:.4f}",
+        "cal_w": f"{weights.cal:.4f}",
+        "prcc_ce_w": f"{weights.prcc_ce:.4f}",
+        "con_w": f"{weights.consistency:.4f}",
+        "dis_w": f"{weights.distill:.4f}",
     }
 
 
@@ -1859,6 +2013,7 @@ def _print_epoch(epoch: int, metrics: dict[str, float]) -> None:
         f"part={metrics['part_triplet']:.4f} cloth={metrics['cloth_invariant']:.4f} "
         f"xcloth={metrics['cross_clothes_contrastive']:.4f} "
         f"pairs={metrics['valid_cross_clothes_pairs']:.1f} "
+        f"skip_xcloth={metrics['skipped_cross_clothes_batches']:.0f} "
         f"domain={metrics['domain']:.4f} "
         f"cal_w={metrics['effective_cal_weight']:.4f} "
         f"prcc_ce_w={metrics['effective_prcc_ce_weight']:.4f} "
