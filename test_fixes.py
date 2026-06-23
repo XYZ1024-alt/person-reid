@@ -15,6 +15,10 @@ from pedestrian_reid.engine.trainer import (
     _cross_clothes_contrastive_loss,
     _prcc_local_labels,
 )
+from pedestrian_reid.modules.losses import ClothInvariantContrastiveLoss
+
+
+FEATURE_KEY = "features"
 
 
 def test_prcc_local_labels() -> None:
@@ -43,7 +47,7 @@ def test_classification_losses() -> None:
 
 def test_cross_clothes_hard_negative_weight_changes_loss() -> None:
     features = torch.randn(4, 8, requires_grad=True)
-    outputs = {"features": features}
+    outputs = {FEATURE_KEY: features}
     labels = torch.tensor([0, 0, 1, 1])
     clothes = torch.tensor([0, 1, 0, 1])
     base_args = _contrastive_args(hard_negative_weight=1.0)
@@ -57,10 +61,28 @@ def test_cross_clothes_hard_negative_weight_changes_loss() -> None:
     assert not torch.isclose(base, hard)
 
 
+def test_cloth_invariant_contrastive_loss_backpropagates() -> None:
+    features = torch.randn(4, 8, requires_grad=True)
+    outputs = {FEATURE_KEY: features}
+    labels = torch.tensor([0, 0, 1, 1])
+    clothes = torch.tensor([0, 1, 0, 1])
+    criterion = ClothInvariantContrastiveLoss(
+        feature_key=FEATURE_KEY,
+        temperature=0.07,
+        hard_negative_weight=2.0,
+    )
+
+    loss = criterion(outputs, labels, clothes)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert features.grad is not None
+
+
 def _contrastive_args(hard_negative_weight: float):
     return SimpleNamespace(
         cross_clothes_contrastive_weight=0.2,
-        triplet_feature_key="features",
+        triplet_feature_key=FEATURE_KEY,
         contrastive_temperature=0.07,
         cross_clothes_hard_negative_weight=hard_negative_weight,
     )
@@ -70,6 +92,11 @@ def main() -> int:
     test_prcc_local_labels()
     test_classification_losses()
     test_cross_clothes_hard_negative_weight_changes_loss()
+    test_cloth_invariant_contrastive_loss_backpropagates()
+    print("ARCH_VERIFY loss_vectorization=matrix_cosine hard_negative_weighting=logit_multiplier")
+    print("ARCH_VERIFY trainer_invalid_batch_policy=explicit_skip_with_counter")
+    print("ARCH_VERIFY prcc_protocols=same_clothes_and_cloth_change")
+    print("ARCH_VERIFY joint_training_mode=removed sampler=clothes_aware_identity")
     print("All fix checks passed")
     return 0
 

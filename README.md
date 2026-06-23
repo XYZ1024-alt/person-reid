@@ -34,7 +34,7 @@ Run a single stage:
 
 ```bash
 START_STAGE=1 STOP_STAGE=1 bash run.sh
-START_STAGE=3 bash run.sh
+START_STAGE=2 bash run.sh
 ```
 
 Manual Market pretraining:
@@ -68,7 +68,7 @@ python scripts/train.py \
 
 ```bash
 python scripts/evaluate.py \
-  --checkpoint outputs/transfer/stage3_prcc_direct/best.pth \
+  --checkpoint outputs/transfer/stage2_prcc_direct/best.pth \
   --dataset prcc \
   --root prcc \
   --batch-size 128
@@ -142,7 +142,7 @@ Default outputs:
 
 ```text
 outputs/transfer/stage1_market_clip/
-outputs/transfer/stage3_prcc_direct/
+outputs/transfer/stage2_prcc_direct/
 ```
 
 Each training directory includes:

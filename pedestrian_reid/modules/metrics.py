@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 TOP_K = 5
 PROTOCOL_STANDARD = "standard"
+PROTOCOL_SAME_CLOTHES = "same_clothes"
 PROTOCOL_CLOTH_CHANGE = "cloth_change"
 REID_FEATURE_KEY = "bn_features"
 COMBINED_FEATURE_KEY = "combined_features"

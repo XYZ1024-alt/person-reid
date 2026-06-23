@@ -12,6 +12,11 @@ from pedestrian_reid.builders import selected_prcc_dev_pids
 from pedestrian_reid.data.datasets import PRCC_CAMERAS, PRCC_GALLERY_CAMERA, PRCC_QUERY_CAMERA, PRCC_SOURCE
 from pedestrian_reid.data.transforms import VARIANT_STANDARD
 from pedestrian_reid.engine import trainer
+from pedestrian_reid.engine.evaluator import EvalJob, primary_eval_metric
+from pedestrian_reid.modules.losses import ClothInvariantContrastiveLoss
+
+
+LOSS_FEATURE_KEY = "combined_features"
 
 
 class PrccObjectiveShiftTest(unittest.TestCase):
@@ -46,7 +51,7 @@ class PrccObjectiveShiftTest(unittest.TestCase):
 
     def test_cross_clothes_contrastive_backpropagates(self) -> None:
         features = torch.randn(4, 8, requires_grad=True)
-        outputs = {"combined_features": features}
+        outputs = {LOSS_FEATURE_KEY: features}
         labels = torch.tensor([0, 0, 1, 1])
         clothes = torch.tensor([0, 1, 0, 1])
         args = _contrastive_args()
@@ -57,15 +62,69 @@ class PrccObjectiveShiftTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss).item())
         self.assertIsNotNone(features.grad)
 
-    def test_cross_clothes_contrastive_requires_positive_pairs(self) -> None:
+    def test_loss_requires_positive_cross_clothes_pairs(self) -> None:
         features = torch.randn(2, 8)
-        outputs = {"combined_features": features}
+        outputs = {LOSS_FEATURE_KEY: features}
         labels = torch.tensor([0, 1])
         clothes = torch.tensor([0, 1])
-        args = _contrastive_args()
+        criterion = ClothInvariantContrastiveLoss(
+            feature_key=LOSS_FEATURE_KEY,
+            temperature=0.07,
+            hard_negative_weight=2.0,
+        )
 
         with self.assertRaisesRegex(ValueError, "no positive cross-clothes pairs"):
-            trainer._cross_clothes_contrastive_loss(outputs, labels, clothes, [PRCC_SOURCE] * 2, args, features.device)
+            criterion(outputs, labels, clothes)
+
+    def test_training_wrapper_skips_invalid_cross_clothes_batch(self) -> None:
+        features = torch.randn(2, 8)
+        outputs = {LOSS_FEATURE_KEY: features}
+        labels = torch.tensor([0, 1])
+        clothes = torch.tensor([0, 1])
+        args = _contrastive_args(strict=False)
+
+        result = trainer._cross_clothes_contrastive_component(
+            outputs,
+            labels,
+            clothes,
+            [PRCC_SOURCE] * 2,
+            args,
+            features.device,
+            epoch=3,
+            batch_index=5,
+        )
+
+        self.assertEqual(result.loss.item(), 0.0)
+        self.assertEqual(result.skipped_batches.item(), 1.0)
+
+    def test_strict_training_wrapper_raises_invalid_cross_clothes_batch(self) -> None:
+        features = torch.randn(2, 8)
+        outputs = {LOSS_FEATURE_KEY: features}
+        labels = torch.tensor([0, 1])
+        clothes = torch.tensor([0, 1])
+        args = _contrastive_args(strict=True)
+
+        with self.assertRaisesRegex(ValueError, "no positive cross-clothes pairs"):
+            trainer._cross_clothes_contrastive_component(
+                outputs,
+                labels,
+                clothes,
+                [PRCC_SOURCE] * 2,
+                args,
+                features.device,
+                epoch=0,
+                batch_index=0,
+            )
+
+    def test_prcc_auto_best_metric_uses_cloth_change_job(self) -> None:
+        eval_results = [
+            (EvalJob("prcc_same_clothes", "root", "same_clothes"), {VARIANT_STANDARD: {"rank1": 0.9}}),
+            (EvalJob("prcc_cloth_change", "root", "cloth_change"), {VARIANT_STANDARD: {"rank1": 0.3}}),
+        ]
+
+        result = primary_eval_metric(eval_results, "rank1", VARIANT_STANDARD, best_dataset="auto")
+
+        self.assertAlmostEqual(result, 0.3)
 
 
 def _write_prcc_train(root: Path, pids) -> None:
@@ -96,12 +155,13 @@ def _args(root: str, *, prcc_dev_identities: int, prcc_dev_seed: int) -> SimpleN
     )
 
 
-def _contrastive_args() -> SimpleNamespace:
+def _contrastive_args(*, strict: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         cross_clothes_contrastive_weight=0.2,
-        triplet_feature_key="combined_features",
+        triplet_feature_key=LOSS_FEATURE_KEY,
         contrastive_temperature=0.07,
         cross_clothes_hard_negative_weight=2.0,
+        strict_cross_clothes_batches=strict,
     )
 
 
